@@ -53,6 +53,7 @@ int main()
         return 1;
     }
 
+	auto res = findPairs(host_vector<BitSequence<K>>(N));
     // cudaDeviceReset must be called before exiting in order for profiling and
     // tracing tools such as Nsight and Visual Profiler to show complete traces.
     cudaStatus = cudaDeviceReset();
@@ -64,12 +65,13 @@ int main()
     return 0;
 }
 
-host_vector<host_vector<unsigned int>> findPairs(const host_vector<BitSequence<K>> h_sequence)
+host_vector<host_vector<unsigned int>> findPairs(const host_vector<BitSequence<K>> & h_sequence)
 {
 	device_vector<BitSequence<K>> d_sequence(h_sequence);
 	BitSequence<N*N> *d_odata, h_odata;
 	cudaMalloc(&d_odata, sizeof(BitSequence<N*N>));
 	checkSequence<N,K> <<< N, 1 >>>(d_sequence, d_odata);
+	cudaDeviceSynchronize();
 	cudaMemcpy(&h_odata, d_odata, sizeof(h_odata), cudaMemcpyDeviceToHost);
 	host_vector<host_vector<unsigned int>> h_res;
 	for (int i = 0; i < N; ++i)
