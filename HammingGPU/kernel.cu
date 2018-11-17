@@ -1,4 +1,3 @@
-
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -6,7 +5,7 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 
-#include "BitSerie.h"
+#include "BitSequence.cuh"
 
 using namespace thrust;
 
@@ -22,7 +21,7 @@ __global__ void addKernel(int *c, const int *a, const int *b)
 }
 
 template<int N, int K>
-__global__ void checkSequence(device_vector<BitSequence<K>> & d_sequence, BitSequence<N*N> *d_odata)
+__global__ void checkSequence(BitSequence<K> * d_sequence, BitSequence<N*N> *d_odata)
 {
 	int i = threadIdx.x;
 	int i1 = i / 8;
@@ -67,7 +66,9 @@ int main()
 
 host_vector<host_vector<unsigned int>> findPairs(const host_vector<BitSequence<K>> & h_sequence)
 {
-	device_vector<BitSequence<K>> d_sequence(h_sequence);
+	BitSequence<K> *d_sequence;
+	cudaMalloc(&d_sequence, h_sequence.size());
+	copy(h_sequence.begin(), h_sequence.end(), device_pointer_cast(d_sequence));
 	BitSequence<N*N> *d_odata, h_odata;
 	cudaMalloc(&d_odata, sizeof(BitSequence<N*N>));
 	checkSequence<N,K> <<< N, 1 >>>(d_sequence, d_odata);

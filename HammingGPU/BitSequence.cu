@@ -1,4 +1,4 @@
-#include "BitSerie.h"
+#include "BitSequence.cuh"
 
 template<unsigned int k>
 __host__ __device__ BitSequence<k>::BitSequence()
