@@ -11,8 +11,6 @@
 using namespace std;
 using namespace thrust;
 
-
-
 __global__ void addKernel(int *c, const int *a, const int *b)
 {
 	int i = threadIdx.x;
@@ -40,16 +38,20 @@ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequence<K> * se
 
 __host__ __device__ void k2ij(int k, int * i, int * j)
 {
-	*i = (int)(ceilf(0.5*(-1 + sqrtf(1 + 8 * k))));
-	*j = (int)(k - 0.5 * (*i) * ((*i) - 1));
+	
+	k += 1;
+	*i = (int)(ceilf(0.5 * (-1 + sqrtf(1 + 8 * k))));
+	*j = (int)(k - 0.5 * (*i) * ((*i) - 1)) - 1;
 }
 
 template<int N, int K>
 __global__ void checkSequences(BitSequence<K> * d_sequence, BitSequence<N*N> *d_odata)
 {
 	int i = threadIdx.x + 1024 * blockIdx.x;
-	int i1 = (int)(ceilf(0.5*(-1 + sqrtf(1 + 8 * i))));
-	int i2 = (int)(i - 0.5 * i1 * (i1 - 1));
+	/*int i1 = (int)(ceilf(0.5*(-1 + sqrtf(1 + 8 * i))));
+	int i2 = (int)(i - 0.5 * i1 * (i1 - 1));*/
+	int i1, i2;
+	k2ij(i, &i1, &i2);
 	char res = compareSequences<K>(d_sequence + i1, d_sequence + i2);
 	d_odata->SetBit(i, res);
 	unsigned int bs = __ballot_sync(-1, res * (1 << i % 32));
