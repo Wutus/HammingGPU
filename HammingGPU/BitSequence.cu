@@ -12,7 +12,7 @@ public:
 	{
 		cudaMemcpy(this->array, array, arSize, cudaMemcpyHostToHost);
 	}
-	__host__ __device__ inline char GetBit(unsigned int index)
+	__host__ __device__ inline char GetBit(unsigned int index) const
 	{
 		return array[index / 8] >> (index % 8) & 1;
 	}
@@ -28,7 +28,7 @@ public:
 	{
 		return (unsigned long long*)(array + word_index * 64 / 8);
 	}
-	static const unsigned int arSize = (k + 7) / 8;
+	static const unsigned int arSize = (k/64 + (!!(k%64)))*8;
 private:
 	char array[arSize];
 };
