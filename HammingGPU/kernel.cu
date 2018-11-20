@@ -69,14 +69,14 @@ __global__ void checkSequences(BitSequence<K> * d_sequence, BitSequence<N*N> *d_
 	unsigned long long i1, i2;
 	k2ij(i, &i1, &i2);
 	char res = compareSequences<K>(d_sequence + i1, d_sequence + i2);
-	unsigned int bs = __ballot_sync(-1, res * (1 << i % 32));
+	unsigned int bs = __ballot_sync(~0, res * (1 << i % 32));
 	*(d_odata->GetWord32(i / 32)) = bs;
 	//printf("Tid %d, i1 %d, i2 %d, res %d, bs %d\n", i, i1, i2, res, bs);
 }
 
-const unsigned int K = 10000;
-const unsigned int N = 1024 * 100;
-const unsigned int L = 1024 * 136;
+const unsigned int K = 10000; //Number of bits in one sequence
+const unsigned int N = 100000; //Number of sequences
+const unsigned int L = 10000000; //Number of blocks in one kernel call
 
 
 ostream & operator<<(ostream & out, BitSequence<K> & sequence)
@@ -186,17 +186,17 @@ vector<pair<int, int>> findPairs(BitSequence<K> * h_sequence)
 	cudaEventRecord( start, 0 );
 	printf("Starting counting on GPU...\n");
 	unsigned long long  offset = 0;
-	unsigned long long nT = N * (N - 1) / 2048;
-	for(unsigned int i = 0; L*i < nT; ++i)
+	unsigned long long nT = N * (N - 1) / 2;
+	for(unsigned int i = 0; 1024*L*i < nT; ++i)
 	{
 		checkSequences<N, K> <<< L, 1024 >>> (d_sequence, d_odata, offset);
-		offset += L;
+		offset += L*1024;
 		cudaDeviceSynchronize();
 	}
-	checkSequences<N, K> <<<(nT%L) / 1024, 1024 >> > (d_sequence, d_odata, offset);
-	offset += (nT%L);
+	checkSequences<N, K> <<<(nT%L), 1024 >>> (d_sequence, d_odata, offset);
+	offset += (nT%L)*1024;
 	cudaDeviceSynchronize();
-	checkSequences<N, K> << <1, nT - offset >> > (d_sequence, d_odata, offset);
+	checkSequences<N, K> <<<1, nT - offset >>> (d_sequence, d_odata, offset);
 
 	cudaDeviceSynchronize();
 
@@ -232,6 +232,7 @@ vector<pair<int, int>> findPairs(BitSequence<K> * h_sequence)
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
     printf("CPU Processing time: %f (ms)\n", time);
+	//printAsMatrix(h_odata2, cout);
 	cout << "Comparison: " << endl;
 	for (unsigned long long i = 0; i < N*(N - 1) / 2; ++i)
 	{
