@@ -1,7 +1,7 @@
 #pragma once
 #include <cuda_runtime_api.h>
 
-template<unsigned int k>
+template<unsigned long long k>
 class BitSequence
 {
 public:
@@ -12,23 +12,23 @@ public:
 	{
 		cudaMemcpy(this->array, array, arSize, cudaMemcpyHostToHost);
 	}
-	__host__ __device__ inline char GetBit(unsigned int index) const
+	__host__ __device__ inline char GetBit(unsigned long long index) const
 	{
 		return array[index / 8] >> (index % 8) & 1;
 	}
-	__host__ __device__ inline void SetBit(unsigned int index, char value)
+	__host__ __device__ inline void SetBit(unsigned long long index, char value)
 	{
 		array[index / 8] = (array[index / 8] & (~(1 << (index % 8)))) | ((!!value) << (index % 8));
 	}
-	__host__ __device__ inline unsigned int *GetWord32(unsigned int word_index)
+	__host__ __device__ inline unsigned int *GetWord32(unsigned long long word_index)
 	{
 		return (unsigned int*)(array + word_index * 32 / 8);
 	}
-	__host__ __device__ inline unsigned long long *GetWord64(unsigned int word_index)
+	__host__ __device__ inline unsigned long long *GetWord64(unsigned long long word_index)
 	{
 		return (unsigned long long*)(array + word_index * 64 / 8);
 	}
-	static const unsigned int arSize = (k/64 + (!!(k%64)))*8;
+	static const unsigned long long arSize = (k/64 + (!!(k%64)))*8;
 private:
 	char array[arSize];
 };
