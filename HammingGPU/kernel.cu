@@ -32,7 +32,7 @@ template<unsigned long long k>
 class BitSequence;
 class CudaTimer;
 
-__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<L> *d_odata, unsigned long long offset = 0)
+__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<L> *d_odata, unsigned long long offset = 0);
 __host__ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequence<K> * sequence2);
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j);
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j);
@@ -79,27 +79,27 @@ public:
 	}
 	__host__ BitSequence(char array[])
 	{
-		cudaMemcpy(this->array, array, arSize, cudaMemcpyHostToHost);
+		cudaMemcpy(this->array, array, arSize*8, cudaMemcpyHostToHost);
 	}
 	__host__ __device__ inline char GetBit(unsigned long long index) const
 	{
-		return array[index / 8] >> (index % 8) & 1;
+		return (array[index / 64] >> (index % 64)) & 1;
 	}
 	__host__ __device__ inline void SetBit(unsigned long long index, char value)
 	{
-		array[index / 8] = (array[index / 8] & (~(1 << (index % 8)))) | ((!!value) << (index % 8));
+		array[index / 64] = (array[index / 64] & (~(1ull << (index % 64)))) | ((!!value) << (index % 64));
 	}
 	__host__ __device__ inline unsigned int *GetWord32(unsigned long long word_index)
 	{
-		return (unsigned int*)(array + word_index * 32 / 8);
+		return ((unsigned int*)array) + word_index);
 	}
 	__host__ __device__ inline unsigned long long *GetWord64(unsigned long long word_index)
 	{
-		return (unsigned long long*)(array + word_index * 64 / 8);
+		return (array + word_index);
 	}
-	static const unsigned long long arSize = (k / 64 + (!!(k % 64))) * 8;
+	static const unsigned long long arSize = (k + 63) / 64;
 private:
-	char array[arSize];
+	unsigned long long array[arSize];
 };
 
 __host__ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequence<K> * sequence2)
@@ -167,6 +167,7 @@ public:
 	{
 		started = true;
 		cudaEventRecord(start);
+		cudaEventSynchronize(start);
 	}
 
 	float Stop()
@@ -343,12 +344,12 @@ vector<pair<int, int> > findPairsGPU(BitSequence<K> * h_sequence)
 #else
 	if (L >= 1024)
 	{
-		checkSequencesGPU << < (int)(L / 1024), 1024 >> > (d_idata, d_odata, 0);
+		checkSequencesGPU <<< (int)(L / 1024), 1024 >>> (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if (L % 1024)
 	{
-		checkSequencesGPU << < 1, L % 1024 >> > (d_idata, d_odata, (L / 1024) * 1024);
+		checkSequencesGPU <<< 1, L % 1024 >>> (d_idata, d_odata, (L / 1024) * 1024);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 #endif
