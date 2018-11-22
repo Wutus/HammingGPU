@@ -3,15 +3,41 @@
 
 #include <stdio.h>
 #include <iostream>
-#include <iomanip>
-#include <bitset>
-
-#include <utility>
 #include <vector>
 
-#include "BitSequence.cu"
-
 using namespace std;
+
+template<unsigned long long k>
+class BitSequence
+{
+public:
+	__host__ BitSequence()
+	{
+	}
+	__host__ BitSequence(char array[])
+	{
+		cudaMemcpy(this->array, array, arSize, cudaMemcpyHostToHost);
+	}
+	__host__ __device__ inline char GetBit(unsigned long long index) const
+	{
+		return array[index / 8] >> (index % 8) & 1;
+	}
+	__host__ __device__ inline void SetBit(unsigned long long index, char value)
+	{
+		array[index / 8] = (array[index / 8] & (~(1 << (index % 8)))) | ((!!value) << (index % 8));
+	}
+	__host__ __device__ inline unsigned int *GetWord32(unsigned long long word_index)
+	{
+		return (unsigned int*)(array + word_index * 32 / 8);
+	}
+	__host__ __device__ inline unsigned long long *GetWord64(unsigned long long word_index)
+	{
+		return (unsigned long long*)(array + word_index * 64 / 8);
+	}
+	static const unsigned long long arSize = (k / 64 + (!!(k % 64))) * 8;
+private:
+	char array[arSize];
+};
 
 #define CHECK_ERRORS(status) do{\
 	if(cudaSuccess != status) {\
