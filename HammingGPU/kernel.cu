@@ -7,6 +7,8 @@
 
 using namespace std;
 
+#define ITER_GPU
+
 #define CHECK_ERRORS(status) do{\
 	if(cudaSuccess != status) {\
 		fprintf(stderr, "Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));\
@@ -72,9 +74,8 @@ __host__ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequenc
 	return !!diff;
 }
 template<unsigned long long N, unsigned long long K>
-void checkSequencesCPU(BitSequence<K> * sequence, void * odatav)
+void checkSequencesCPU(BitSequence<K> * sequence, BitSequence<N*(N - 1) / 2> * odata)
 {
-	BitSequence<N*(N * 1) / 2> *odata = (BitSequence<N*(N * 1) / 2> *)odatav;
 	unsigned long long numberOfComparisons = N * (N - 1) / 2;
 	for (unsigned long long k = 0; k < numberOfComparisons; k += 32)
 	{
@@ -89,28 +90,17 @@ void checkSequencesCPU(BitSequence<K> * sequence, void * odatav)
 	}
 }
 
-__host__ __device__ void k2ij(unsigned long long  k, unsigned int * i, unsigned int  * j)
+__host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
 	//adding 1 to k to skip first result
-	*i = (unsigned int)(0.5 * (-1 + sqrtl(1 + 8 * (k + 1))));
+	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
 	//decreasing 1 from j , as we start from 0 not 1
 	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
 }
 
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
 {
-	return i * (i - 1) / 2 + j;
-}
-
-template<unsigned long long N, unsigned long long K>
-__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<((N*(N - (1))) / (2))> *d_odata, unsigned long long offset = 0)
-{
-	unsigned long long i = threadIdx.x + blockIdx.x * 512 + offset;
-	unsigned int i1, i2;
-	k2ij(i, &i1, &i2);
-	i2 = compareSequences<K>(d_sequence + i1, d_sequence + i2);
-	i1 = __ballot(compareSequences<K>(d_sequence + i1, d_sequence + i2));
-	*(d_odata->GetWord32(i/32)) = i1;
+	return ((unsigned long long)i) * (i - 1) / 2 + j;
 }
 
 class CudaTimer
@@ -141,7 +131,6 @@ public:
 			return -1.0f;
 		float ms;
 		cudaEventRecord(stop);
-		cudaEventSynchronize(start);
 		cudaEventSynchronize(stop);
 		cudaEventElapsedTime(&ms, start, stop);
 		started = false;
@@ -204,13 +193,27 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 			cout << "(" << gv[i].first << ", " << gv[i].second << ")" << endl;
 		}
 	}
+	if (equal)
+	{
+		cout << "Results are the same" << endl;
+	}
 	return equal;
 }
 
 const unsigned long long K = 10000; //Number of bits in one sequence
 const unsigned long long N = 100000; //Number of sequences
 const unsigned long long L = (N*(N - 1)) / 2; //Number of comparisons
-const unsigned int B = 100; //Number of maximum blocks per call
+const unsigned int B = 100000; //Number of maximum blocks per call
+
+__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<((N*(N - (1))) / (2))> *d_odata, unsigned long long offset = 0)
+{
+	unsigned long long i = threadIdx.x + blockIdx.x * blockDim.x + offset;
+	unsigned int i1, i2;
+	k2ij(i, &i1, &i2);
+	i2 = compareSequences<K>(d_sequence + i1, d_sequence + i2);
+	i1 = __ballot(compareSequences<K>(d_sequence + i1, d_sequence + i2));
+	*(d_odata->GetWord32(i / 32)) = i1;
+}
 
 ostream & operator<<(ostream & out, BitSequence<K> & sequence)
 {
@@ -324,8 +327,8 @@ vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 	cudaFree(d_idata);
 	cudaFree(d_odata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	auto res = vector<pair<int, int>>();
-	//auto res = ToPairVector(*h_odata);
+	//auto res = vector<pair<int, int>>();
+	auto res = ToPairVector(*h_odata);
 	delete h_odata;
 	return res;
 }
@@ -334,7 +337,11 @@ vector<pair<int, int>> findPairsCPU(BitSequence<K> * sequence)
 {
 	BitSequence<L> *odata;
 	odata = new BitSequence<L>();
+	CudaTimer timerCall;
+	timerCall.Start();
 	checkSequencesCPU<N,K>(sequence, odata);
+	float xtime = timerCall.Stop();
+	printf("CPU execution time: %f\n", xtime);
 	auto res = ToPairVector(*odata);
 	delete odata;
 	return res;
@@ -348,7 +355,8 @@ int main()
 	printf("Ended sequence generation!\n");
 
 	auto gpuRes = findPairsGPU(sequence);
-	//auto cpuRes = findPairsCPU(sequence);
+	auto cpuRes = findPairsCPU(sequence);
+	ComparePairs(gpuRes, cpuRes);
 
 	// cudaDeviceReset must be called before exiting in order for profiling and
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
