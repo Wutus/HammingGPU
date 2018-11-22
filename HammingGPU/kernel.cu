@@ -63,12 +63,7 @@ void checkSequencesCPU(BitSequence<K> * sequence, void * odatav)
 	}
 }
 
-__host__ __device__ inline double sqrtp(unsigned long long a)
-{
-	return 0.0f;
-}
-
-__host__ __device__ inline void k2ij(unsigned long long  k, unsigned int * i, unsigned int  * j)
+__host__ __device__ void k2ij(unsigned long long  k, unsigned int * i, unsigned int  * j)
 {
 	//adding 1 to k to skip first result
 	*i = (unsigned int)(0.5 * (-1 + sqrtl(1 + 8 * (k + 1))));
@@ -76,44 +71,21 @@ __host__ __device__ inline void k2ij(unsigned long long  k, unsigned int * i, un
 	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
 }
 
-__host__ __device__ inline unsigned long long ij2k(unsigned int i, unsigned int j)
+__host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
 {
 	return i * (i - 1) / 2 + j;
 }
 
 template<unsigned long long N, unsigned long long K>
-__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<N*(N - 1) / 2> *d_odata, unsigned long long offset = 0)
+__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<((N*(N - (1))) / (2))> *d_odata, unsigned long long offset = 0)
 {
 	unsigned long long i = threadIdx.x + blockIdx.x * 512 + offset;
 	unsigned int i1, i2;
 	k2ij(i, &i1, &i2);
 	i2 = compareSequences<K>(d_sequence + i1, d_sequence + i2);
-	i1 = __ballot_sync(~0, compareSequences<K>(d_sequence + i1, d_sequence + i2));
+	i1 = __ballot(compareSequences<K>(d_sequence + i1, d_sequence + i2));
 	*(d_odata->GetWord32(i/32)) = i1;
 }
-
-template<unsigned long long N, unsigned long long K>
-__global__ void checkSequencesGPU2(BitSequence<K> * d_sequence, BitSequence<N*(N - 1) / 2> *d_odata, unsigned long long offset = 0)
-{
-	//unsigned long long i = (unsigned long long)threadIdx.x + (unsigned long long)512 * (unsigned long long)blockIdx.x + offset;
-	unsigned long long i = threadIdx.x + blockIdx.x * 512 + offset;
-	unsigned int i1, i2;
-	//printf("%d\n", blockIdx.x);
-	k2ij(i, &i1, &i2);
-	/*if (ij2k(i1, i2) != i)
-	{
-		printf("Error! ij2k not giving the same as k2ij! (i = %d, j = %d, k = %d)", i1, i2, i);
-		return;
-	}*/
-	//*((unsigned int*)(d_odata + i / 32 * 4)) = i1; = 0;
-	//((unsigned int*)(d_odata + i / 32 * 4)) = i1; = __ballot_sync(~0, compareSequences<K>(d_sequence + i1, d_sequence + i2));
-	/*i2 = compareSequences<K>(d_sequence + i1, d_sequence + i2);
-	if(!(i%32))
-		*(unsigned int*)(d_odata + i / 32 * 4) = __ballot_sync(~0, i2);*/
-		//*(unsigned int*)(d_odata + i / 32 * 4) = i1;
-		//printf("Tid %d, i1 %d, i2 %d, res %d, bs %d\n", i, i1, i2, res, bs);
-}
-
 
 class CudaTimer
 {
@@ -174,7 +146,7 @@ void PrintComparison(const BitSequence<K> & gpu_sequence, const BitSequence<K> &
 	}
 }
 
-bool ComparePairs(const vector<pair<int, int>> & gpu_result, const vector<pair<int, int>> & cpu_result)
+bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<int, int> > & cpu_result)
 {
 	unsigned long long gsize = gpu_result.size(), csize = cpu_result.size();
 	unsigned long long n = gsize < csize? gsize : csize;
@@ -228,7 +200,6 @@ BitSequence<K> * Generate()
 	srand(2018);
 
 	BitSequence<K> * r = new BitSequence<K>[N];
-	//memset(r, 0, sizeof(BitSequence<K>)*N);
 
 	for (int i = 0; i < N; i++)
 	{
@@ -275,25 +246,6 @@ void printAsMatrix(const BitSequence<L> & sequence, ostream & stream)
 	}
 }
 
-void printAsMatrix(const vector<std::pair<int, int>>, ostream & stream)
-{
-	/*for (int j = 0; j < N; ++j)
-	{
-		for (int i = 1; j < N; ++i)
-		{
-			if (j <= i)
-			{
-				cout << "  ";
-			}
-			else
-			{
-				cout << sequence.GetBit(ij2k(i, j)) + '0' << " ";
-			}
-		}
-		cout << endl;
-	}*/
-}
-
 vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 {
 	BitSequence<K> *d_idata;
@@ -309,7 +261,8 @@ vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 	CHECK_ERRORS(cudaMemcpy(d_odata, h_odata, outputSize, cudaMemcpyHostToDevice));
 	timerCall.Start();
 	unsigned long long offset = 0;
-	/*for (; offset + B * 1024 < L; offset += B * 1024)
+#ifdef ITER_GPU
+	for (; offset + B * 1024 < L; offset += B * 1024)
 	{
 		checkSequencesGPU<N, K> <<< B, 1024 >>> (d_idata, d_odata, offset);
 		CHECK_ERRORS(cudaDeviceSynchronize());
@@ -326,7 +279,8 @@ vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 		offset += L - offset;
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
-	CHECK_ERRORS(cudaDeviceSynchronize());*/
+	CHECK_ERRORS(cudaDeviceSynchronize());
+#else
 	if (L >= 1024)
 	{
 		checkSequencesGPU<N, K> <<< (int)(L/1024), 1024 >>> (d_idata, d_odata, 0);
@@ -337,6 +291,7 @@ vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 		checkSequencesGPU<N, K> <<< 1, L % 1024 >>> (d_idata, d_odata, (L/1024)*1024);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
+#endif
 	xtime = timerCall.Stop();
 	CHECK_ERRORS(cudaMemcpy(h_odata, d_odata, outputSize, cudaMemcpyDeviceToHost));
 	xmtime = timerMemory.Stop();
@@ -379,199 +334,3 @@ int main()
 
 	return 0;
 }
-
-//vector<pair<int, int>> findPairs(BitSequence<K> * h_sequence)
-//{
-//	cudaError_t cudaStatus;
-//	BitSequence<K> *d_sequence;
-//
-//	cudaStatus = cudaMalloc((void**)&d_sequence, sizeof(BitSequence<K>)*N);
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		fprintf(stderr, "cudaMalloc failed!  Do you have a CUDA-capable GPU installed?");
-//	}
-//
-//	cudaStatus = cudaMemcpy(d_sequence, h_sequence, sizeof(BitSequence<K>)*N, cudaMemcpyHostToDevice);
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		fprintf(stderr, "cudaMemcpy failed!  Do you have a CUDA-capable GPU installed?");
-//	}
-//	//Too big to keep on stack
-//	BitSequence<L> *d_odata, *h_odata_p, *h_odata_p2;
-//	h_odata_p = new BitSequence<L>;
-//	h_odata_p2 = new BitSequence<L>;
-//	BitSequence<L> & h_odata = *h_odata_p;
-//	BitSequence<L> & h_odata2 = *h_odata_p2;
-//	//printAsMatrix(h_odata, cout);
-//	cudaStatus = cudaMalloc((void**)&d_odata, sizeof(BitSequence<L>));
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		fprintf(stderr, "cudaMallocfailed!  Do you have a CUDA-capable GPU installed?\n");
-//	}
-//	printf("Reserved %d under %d\n", sizeof(BitSequence<L>), d_odata);
-//	cudaStatus = cudaMemcpy(h_odata_p, d_odata, sizeof(h_odata), cudaMemcpyDeviceToHost);
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "cudaMemcpy no 1 failed! %s\n", err_str);
-//	}
-//	cudaEvent_t start, stop; 
-//	float time;
-//	cudaEventCreate(&start);
-//	cudaEventCreate(&stop);
-//
-//	cudaEventRecord( start, 0 );
-//	printf("Starting counting on GPU...\n");
-//	unsigned long long offset = 0;
-//	unsigned long long nT = N * (N - 1) / 2;
-//	/*for(unsigned long long i = 0; 1024*L*i < nT; ++i)
-//	{
-//		checkSequences<N, K> <<< L, 1024 >>> (d_sequence, d_odata, offset);
-//		offset += L*1024;
-//		printf("offset %ull\n", offset);
-//		cudaStatus = cudaDeviceSynchronize();
-//		if (cudaStatus != cudaSuccess)
-//		{
-//			const char *err_str = cudaGetErrorString(cudaStatus);
-//			fprintf(stderr, "kernelCall failed on offset %ull! %s\n", err_str, offset);
-//		}
-//	}
-//	checkSequences<N, K> <<<(nT%L), 1024 >>> (d_sequence, d_odata, offset);
-//	offset += (nT%L)*1024;
-//	printf("offset %ull\n", offset);
-//	cudaStatus = cudaDeviceSynchronize();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "kernelCall failed on offset %ull! %s\n", err_str, offset);
-//	}
-//	checkSequences<N, K> <<<1, nT - offset >>> (d_sequence, d_odata, offset);
-//	offset = nT;
-//	printf("offset %ull\n", offset);*/
-//	printf("Gonna run %llu blocks (%d), for %llu comparisons\n", L / 512, L / 512 < (1 << 30) - 1, L);
-//	checkSequences<N, K> <<< (unsigned int)(L/512), 512 >>> (d_sequence, d_odata, 0);
-//
-//	/*cudaStatus = cudaGetLastError();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "cudaGetLastError failed! %s\n", err_str);
-//	}*/
-//
-//	cudaStatus = cudaDeviceSynchronize();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "kernelCall failed (%s) on offset %llu!\n", err_str, offset);
-//	}
-//
-//	offset = (nT / (unsigned long long)512) * (unsigned long long)512;
-//	printf("offset: %llu\n", offset);
-//	//checkSequences<N, K> <<<1, (unsigned int)(nT%512) >> > (d_sequence, d_odata, offset);
-//
-//	/*cudaStatus = cudaDeviceSynchronize();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "kernelCall failed on offset %ull! %s\n", err_str, offset);
-//	}*/
-//
-//	cudaStatus = cudaGetLastError();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "cudaGetLastError failed! %s\n", err_str);
-//	}
-//
-//	cudaEventRecord( stop, 0 );
-//	cudaEventSynchronize( stop );
-//
-//	cudaEventElapsedTime( &time, start, stop );
-//
-//	cudaEventDestroy( start );
-//	cudaEventDestroy( stop );
-//    printf("GPU Processing time: %f (ms)\n", time);
-//
-//	cudaStatus = cudaGetLastError();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "cudaGetLastError failed! %s\n", err_str);
-//	}
-//
-//	printf("sizeof(h_odata): %d, d_odata %d\n", sizeof(h_odata), sizeof(*d_odata));
-//	cudaStatus = cudaMemcpy(h_odata_p, d_odata, sizeof(h_odata), cudaMemcpyDeviceToHost);
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "cudaMemcpy failed! %s\n", err_str);
-//	}
-//	cudaStatus = cudaDeviceSynchronize();
-//	if (cudaStatus != cudaSuccess)
-//	{
-//		const char *err_str = cudaGetErrorString(cudaStatus);
-//		fprintf(stderr, "cudaDeviceSynchronize returned error code %s after launching addKernel!\nCurrent offset %llu", err_str, offset);
-//	}
-//	//printAsMatrix(h_odata, cout);
-//
-//	/*cudaEventCreate(&start);
-//	cudaEventCreate(&stop);
-//	cudaEventRecord(start, 0);
-//	cudaEventSynchronize(start);
-//	printf("Starting counting on CPU... \n");
-//	checkSequencesCPU<N, K>(h_sequence, &h_odata2);
-//	
-//	cudaEventRecord(stop, 0);
-//	cudaEventSynchronize(stop);
-//	cudaEventElapsedTime(&time, start, stop);
-//
-//	cudaEventDestroy(start);
-//	cudaEventDestroy(stop);
-//    printf("CPU Processing time: %f (ms)\n", time);
-//	//printAsMatrix(h_odata2, cout);
-//	cout << "Comparison: " << endl;
-//	
-//	//printAsMatrix(h_odata, cout);
-//	
-//	// ZWRACANIE TABLICY DWÓJEK*/
-//	vector<pair<int, int>> result;
-//
-//	//cudaFree(d_sequence);
-//	//cudaFree(d_odata);
-//	//delete h_odata_p;
-//	//delete h_odata_p2;
-//	/*for (unsigned long long i = 0; i < N*(N-1)/2; ++i)
-//	{
-//		unsigned long long i1, i2;
-//		k2ij(i, &i1, &i2);
-//		cout << i1 << " " << i2 << ": " << (short int)h_odata.GetBit(i) << endl;
-//	}*/
-//	return result;
-//}
-
-/*BitSequence<L> *CPUHamming(BitSequence<K> * h_sequence)
-{
-	BitSequence<L> *h_odata_p = new BitSequence<L>;
-	BitSequence<L> & h_odata2 = *h_odata_p;
-
-	cudaEvent_t start, stop; float time;
-
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
-	cudaEventRecord(start, 0);
-	cudaEventSynchronize(start);
-
-	printf("Starting counting on CPU... \n");
-	checkSequencesCPU<N, K>(h_sequence, &h_odata2);
-
-	cudaEventRecord(stop, 0);
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&time, start, stop);
-
-	cudaEventDestroy(start);
-	cudaEventDestroy(stop);
-	printf("CPU Processing time: %f (ms)\n", time);
-	//printAsMatrix(h_odata2, cout);
-
-	return h_odata_p;
-}*/
