@@ -7,7 +7,7 @@
 
 using namespace std;
 
-#define ITER_GPU
+//#define ITER_GPU
 
 #define CHECK_ERRORS(status) do{\
 	if(cudaSuccess != status) {\
@@ -22,6 +22,11 @@ using namespace std;
 		fprintf(stderr, "\n");\
 	}\
 }while(0)
+
+#define K 10000 //Number of bits in one sequence
+#define N 100000 //Number of sequences
+#define L ((N*(N - 1)) / 2) //Number of comparisons
+#define B 100000 //Number of maximum blocks per call
 
 template<unsigned long long k>
 class BitSequence
@@ -55,7 +60,6 @@ private:
 	char array[arSize];
 };
 
-template<unsigned long long K>
 __host__ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequence<K> * sequence2)
 {
 	int diff = 0;
@@ -73,10 +77,21 @@ __host__ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequenc
 	}
 	return !!diff;
 }
-template<unsigned long long N, unsigned long long K>
-void checkSequencesCPU(BitSequence<K> * sequence, BitSequence<N*(N - 1) / 2> * odata)
+
+__host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
-	unsigned long long numberOfComparisons = N * (N - 1) / 2;
+	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
+	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
+}
+
+__host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
+{
+	return ((unsigned long long)i) * (i - 1) / 2 + j;
+}
+
+void checkSequencesCPU(BitSequence<K> * sequence, BitSequence<L> * odata)
+{
+	unsigned long long numberOfComparisons = L;
 	for (unsigned long long k = 0; k < numberOfComparisons; k += 32)
 	{
 		unsigned int result = 0;
@@ -84,23 +99,10 @@ void checkSequencesCPU(BitSequence<K> * sequence, BitSequence<N*(N - 1) / 2> * o
 		{
 			unsigned int i1, i2;
 			k2ij(k + i, &i1, &i2);
-			result |= (unsigned int)(compareSequences<K>(sequence + i1, sequence + i2)) << i;
+			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
 		}
 		*(odata->GetWord32(k / 32)) = result;
 	}
-}
-
-__host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
-{
-	//adding 1 to k to skip first result
-	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
-	//decreasing 1 from j , as we start from 0 not 1
-	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
-}
-
-__host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
-{
-	return ((unsigned long long)i) * (i - 1) / 2 + j;
 }
 
 class CudaTimer
@@ -141,8 +143,7 @@ private:
 	cudaEvent_t start, stop;
 };
 
-template<unsigned long long K>
-void PrintComparison(const BitSequence<K> & gpu_sequence, const BitSequence<K> & cpu_sequence, unsigned long long N)
+void PrintComparison(const BitSequence<K> & gpu_sequence, const BitSequence<K> & cpu_sequence)
 {
 	for (unsigned long long i = 0; i < N*(N - 1) / 2; ++i)
 	{
@@ -151,12 +152,6 @@ void PrintComparison(const BitSequence<K> & gpu_sequence, const BitSequence<K> &
 			unsigned int i1, i2;
 			k2ij(i, &i1, &i2);
 			cout << "Difference on comparison number " << i << " (" << i1 << ", " << i2 << ") GPU " << (short int)gpu_sequence.GetBit(i) << " CPU " << (short int)cpu_sequence.GetBit(i) << endl;
-			unsigned int diff = 0;
-			for (unsigned int j = 0; j < K; ++j)
-			{
-				diff += gpu_sequence[i1].GetBit(j) ^ cpu_sequence[i2].GetBit(j);
-			}
-			cout << "No of diffs: " << diff << endl;
 		}
 	}
 }
@@ -165,8 +160,7 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 {
 	unsigned long long gsize = gpu_result.size(), csize = cpu_result.size();
 	unsigned long long n = gsize < csize? gsize : csize;
-	const vector<pair<int, int>> & lv = gsize < csize ? gpu_result : cpu_result;
-	const vector<pair<int, int>> & gv = gsize < csize ? cpu_result : gpu_result;
+	const vector<pair<int, int> > & gv = gsize < csize ? cpu_result : gpu_result;
 	bool equal = true;
 
 	if (gsize != csize)
@@ -200,18 +194,13 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 	return equal;
 }
 
-const unsigned long long K = 10000; //Number of bits in one sequence
-const unsigned long long N = 100000; //Number of sequences
-const unsigned long long L = (N*(N - 1)) / 2; //Number of comparisons
-const unsigned int B = 100000; //Number of maximum blocks per call
-
-__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<((N*(N - (1))) / (2))> *d_odata, unsigned long long offset = 0)
+__global__ void checkSequencesGPU(BitSequence<K> * d_sequence, BitSequence<L> *d_odata, unsigned long long offset = 0)
 {
 	unsigned long long i = threadIdx.x + blockIdx.x * blockDim.x + offset;
 	unsigned int i1, i2;
 	k2ij(i, &i1, &i2);
-	i2 = compareSequences<K>(d_sequence + i1, d_sequence + i2);
-	i1 = __ballot(compareSequences<K>(d_sequence + i1, d_sequence + i2));
+	i2 = compareSequences(d_sequence + i1, d_sequence + i2);
+	i1 = __ballot(i2);
 	*(d_odata->GetWord32(i / 32)) = i1;
 }
 
@@ -275,7 +264,7 @@ void printAsMatrix(const BitSequence<L> & sequence, ostream & stream)
 	}
 }
 
-vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
+vector<pair<int, int> > findPairsGPU(BitSequence<K> * h_sequence)
 {
 	BitSequence<K> *d_idata;
 	BitSequence<L> *h_odata, *d_odata;
@@ -293,18 +282,18 @@ vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 #ifdef ITER_GPU
 	for (; offset + B * 1024 < L; offset += B * 1024)
 	{
-		checkSequencesGPU<N, K> <<< B, 1024 >>> (d_idata, d_odata, offset);
+		checkSequencesGPU <<< B, 1024 >>> (d_idata, d_odata, offset);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if (L - offset >= 1024)
 	{
-		checkSequencesGPU<N, K> <<< (int)((L - offset) / 1024), 1024 >>> (d_idata, d_odata, offset);
+		checkSequencesGPU <<< (int)((L - offset) / 1024), 1024 >>> (d_idata, d_odata, offset);
 		offset += (L - offset) * 1024;
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if ((L - offset) % 1024)
 	{
-		checkSequencesGPU<N, K> <<< 1, (int)(L - offset) >>> (d_idata, d_odata, offset);
+		checkSequencesGPU <<< 1, (int)(L - offset) >>> (d_idata, d_odata, offset);
 		offset += L - offset;
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
@@ -333,13 +322,13 @@ vector<pair<int, int>> findPairsGPU(BitSequence<K> * h_sequence)
 	return res;
 }
 
-vector<pair<int, int>> findPairsCPU(BitSequence<K> * sequence)
+vector<pair<int, int> > findPairsCPU(BitSequence<K> * sequence)
 {
 	BitSequence<L> *odata;
 	odata = new BitSequence<L>();
 	CudaTimer timerCall;
 	timerCall.Start();
-	checkSequencesCPU<N,K>(sequence, odata);
+	checkSequencesCPU(sequence, odata);
 	float xtime = timerCall.Stop();
 	printf("CPU execution time: %f\n", xtime);
 	auto res = ToPairVector(*odata);
