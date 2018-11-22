@@ -7,6 +7,20 @@
 
 using namespace std;
 
+#define CHECK_ERRORS(status) do{\
+	if(cudaSuccess != status) {\
+		fprintf(stderr, "Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));\
+	}\
+}while(0)
+
+#define CHECK_ERRORS_FORMAT(status, format, ...) do{\
+	if(cudaSuccess != status) {\
+		fprintf(stderr, "Cuda Error in %s:%d - %s", __FILE__, __LINE__, cudaGetErrorString(status));\
+		fprintf(stderr, format, __VA_ARGS__);\
+		fprintf(stderr, "\n");\
+	}\
+}while(0)
+
 template<unsigned long long k>
 class BitSequence
 {
@@ -38,20 +52,6 @@ public:
 private:
 	char array[arSize];
 };
-
-#define CHECK_ERRORS(status) do{\
-	if(cudaSuccess != status) {\
-		fprintf(stderr, "Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));\
-	}\
-}while(0)
-
-#define CHECK_ERRORS_FORMAT(status, format, ...) do{\
-	if(cudaSuccess != status) {\
-		fprintf(stderr, "Cuda Error in %s:%d - %s", __FILE__, __LINE__, cudaGetErrorString(status));\
-		fprintf(stderr, format, __VA_ARGS__);\
-		fprintf(stderr, "\n");\
-	}\
-}while(0)
 
 template<unsigned long long K>
 __host__ __device__ char compareSequences(BitSequence<K> * sequence1, BitSequence<K> * sequence2)
