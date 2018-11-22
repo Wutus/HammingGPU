@@ -301,12 +301,12 @@ vector<pair<int, int> > findPairsGPU(BitSequence<K> * h_sequence)
 #else
 	if (L >= 1024)
 	{
-		checkSequencesGPU<N, K> <<< (int)(L/1024), 1024 >>> (d_idata, d_odata, 0);
+		checkSequencesGPU <<< (int)(L/1024), 1024 >>> (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if (L % 1024)
 	{
-		checkSequencesGPU<N, K> <<< 1, L % 1024 >>> (d_idata, d_odata, (L/1024)*1024);
+		checkSequencesGPU <<< 1, L % 1024 >>> (d_idata, d_odata, (L/1024)*1024);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 #endif
