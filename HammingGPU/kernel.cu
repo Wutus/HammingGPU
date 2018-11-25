@@ -26,8 +26,8 @@ using namespace std;
 	}\
 }while(0)
 
-#define BITS_IN_SEQUENCE 64 //Number of bits in one sequence
-#define INPUT_SEQUENCE_SIZE 100*1024 //Number of sequences
+#define BITS_IN_SEQUENCE 10000 //Number of bits in one sequence
+#define INPUT_SEQUENCE_SIZE 100000ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
 #define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_IN_BLOCK 1024
@@ -124,7 +124,7 @@ public:
 	{
 		HostResultArray<N> host;
 		unsigned int *temp_arr[N - 1];
-		CHECK_ERRORS(cudaMemcpy(temp_arr, arr,sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
+		CHECK_ERRORS(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
 		for (int i = 0; i < N - 1; ++i)
 		{
 			CHECK_ERRORS(cudaMemcpy(host.arr[i], temp_arr[i], sizeof(unsigned int) * (ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
@@ -166,7 +166,7 @@ int main()
 	auto cpuRes = FindPairsCPU(sequence);
 	//PrintArray(sequence);
 	ComparePairs(gpuRes, cpuRes);
-	
+
 	// cudaDeviceReset must be called before exiting in order for profiling and
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
 	cudaStatus = cudaDeviceReset();
@@ -242,16 +242,36 @@ __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
 void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISONS> * odata)
 {
 	unsigned long long numberOfComparisons = COMPARISONS;
-	for (unsigned long long k = 0; k < numberOfComparisons; k += 32)
+	int i1 = 1, i2 = 0;
+	for (unsigned long long k = 0; k < numberOfComparisons/32; ++k)
 	{
 		unsigned int result = 0;
 		for (int i = 0; i < 32; i++)
 		{
-			unsigned int i1, i2;
-			k2ij(k + i, &i1, &i2);
 			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
+			++i2;
+			if (i2 == i1)
+			{
+				++i1;
+				i2 = 0;
+			}
 		}
-		*(odata->GetWord32(k / 32)) = result;
+		*(odata->GetWord32(k)) = result;
+	}
+	if (numberOfComparisons % 32)
+	{
+		unsigned int result = 0;
+		for (int i = 0; i < numberOfComparisons % 32; i++)
+		{
+			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
+			++i2;
+			if (i2 == i1)
+			{
+				++i1;
+				i2 = 0;
+			}
+		}
+		*(odata->GetWord32(numberOfComparisons / 32)) = result;
 	}
 }
 
@@ -311,15 +331,15 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 {
 	unsigned long long gsize = gpu_result.size(), csize = cpu_result.size();
 	unsigned long long n = gsize < csize ? gsize : csize;
-	
+
 	vector<pair<int, int> > gpu_res(gpu_result);
 	vector<pair<int, int> > cpu_res(cpu_result);
 	sort(gpu_res.begin(), gpu_res.end());
 	sort(cpu_res.begin(), cpu_res.end());
 
 	const vector<pair<int, int> > & gv = csize > gsize ? cpu_res : gpu_res;
-	bool equal = true;	
-	
+	bool equal = true;
+
 	if (gsize != csize)
 	{
 		cout << "Number of elements is not equal (GPU: " << gsize << ", CPU: " << csize << ") !" << endl;
@@ -341,11 +361,11 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 		}
 		else
 		{
-		//cout << "Pair " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
-		//		<< cpu_res[i].first << ", " << cpu_res[i].second << ")" << endl;
-		
+			//cout << "Pair " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
+			//		<< cpu_res[i].first << ", " << cpu_res[i].second << ")" << endl;
+
 		}
-		
+
 	}
 	if (csize != gsize)
 	{
@@ -383,7 +403,7 @@ ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence)
 
 BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
 {
-//dla 2019 blad na 1 bicie
+	//dla 2019 blad na 1 bicie
 	srand(2019);
 
 	BitSequence<BITS_IN_SEQUENCE> * r = new BitSequence<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
@@ -392,7 +412,7 @@ BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
 
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
 	{
-		*(r[i].GetWord32(0)) = i;
+		*(r[i].GetWord32(0)) = i%2;
 		/*for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
 		{
 			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
@@ -475,12 +495,12 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 #else
 	if (COMPARISONS >= THREADS_IN_BLOCK)
 	{
-		Hamming1GPU <<< (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >>> (d_idata, d_odata, 0);
+		Hamming1GPU << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if (COMPARISONS % THREADS_IN_BLOCK)
 	{
-		Hamming1GPU <<< 1, COMPARISONS % THREADS_IN_BLOCK >>> (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
+		Hamming1GPU << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 #endif
@@ -517,7 +537,7 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 {
 	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int seq_no = tid + column_offset;
-	
+
 	BitSequence<BITS_IN_SEQUENCE> s = *(sequences + seq_no);
 	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
 	if (threadIdx.x < SEQUENCES_PER_CALL)
@@ -566,14 +586,18 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
 	timerCall.Start();
 
-	for (int j = INPUT_SEQUENCE_SIZE-1; j >= 0; j -= SEQUENCES_PER_CALL)
+	for (int j = INPUT_SEQUENCE_SIZE - 1; j >= 0; j -= SEQUENCES_PER_CALL)
 	{
 		if (j >= THREADS_PER_BLOCK)
+		{
 			Hamming2GPU <<< j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, 0);
-		CHECK_ERRORS(cudaDeviceSynchronize());
+			//CHECK_ERRORS(cudaDeviceSynchronize());
+		}
 		if (j % THREADS_PER_BLOCK > 0)
+		{
 			Hamming2GPU <<< 1, j%THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
-		CHECK_ERRORS(cudaDeviceSynchronize());
+			//CHECK_ERRORS(cudaDeviceSynchronize());
+		}
 	}
 	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xtime = timerCall.Stop();
