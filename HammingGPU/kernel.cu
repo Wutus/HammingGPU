@@ -143,7 +143,7 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 
 ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence);
 BitSequence<BITS_IN_SEQUENCE> * GenerateInput();
-vector<pair<int, int>> ToPairVector(const BitSequence<COMPARISONS> & result_sequence);
+vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_sequence);
 void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
@@ -182,12 +182,9 @@ template<unsigned long long k>
 class BitSequence
 {
 public:
-	__host__ BitSequence()
+	__host__ __device__ BitSequence()
 	{
-	}
-	__host__ BitSequence(char array[])
-	{
-		cudaMemcpy(this->array, array, arSize * 8, cudaMemcpyHostToHost);
+
 	}
 	__host__ __device__ inline char GetBit(unsigned long long index) const
 	{
@@ -214,6 +211,7 @@ public:
 	__host__ __device__ const BitSequence<k> & operator=(const BitSequence<k> & sequence)
 	{
 		memcpy(array, sequence.array, arSize * 8);
+		return sequence;
 	}
 	static const unsigned long long arSize = (k + 63) / 64;
 private:
@@ -253,7 +251,7 @@ void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISO
 {
 	unsigned long long numberOfComparisons = COMPARISONS;
 	int i1 = 1, i2 = 0;
-	for (unsigned long long k = 0; k < numberOfComparisons/32; ++k)
+	for (unsigned long long k = 0; k < numberOfComparisons / 32; ++k)
 	{
 		unsigned int result = 0;
 		for (int i = 0; i < 32; i++)
@@ -398,7 +396,8 @@ __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSeque
 	unsigned int i1, i2;
 	k2ij(i, &i1, &i2);
 	i2 = compareSequences(d_sequence + i1, d_sequence + i2);
-	i1 = __ballot_sync(~0, i2);
+	__syncthreads();
+	i1 = __ballot(~0, i2);
 	*(d_odata->GetWord32(i / 32)) = i1;
 }
 
@@ -422,7 +421,7 @@ BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
 
 	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
 	{
-		*(r[i].GetWord32(0)) = i%2;
+		*(r[i].GetWord32(0)) = i % 1024;
 		/*for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
 		{
 			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
@@ -433,9 +432,9 @@ BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
 	return r;
 }
 
-vector<pair<int, int>> ToPairVector(const BitSequence<COMPARISONS> & result_sequence)
+vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_sequence)
 {
-	vector<pair<int, int>> result;
+	vector<pair<int, int> > result;
 	for (unsigned long long k = 0; k < COMPARISONS; k++)
 	{
 		if (result_sequence.GetBit(k))
@@ -521,7 +520,7 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	cudaFree(d_odata);
 	printf("GPU Times : execution: %f, with copying memory: %f\n", xtime, xmtime);
 
-	auto res = ToPairVector(*h_odata);
+	vector<pair<int,int> > res = ToPairVector(*h_odata);
 	delete h_odata;
 	return res;
 }
@@ -535,7 +534,7 @@ vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
 	Hamming1CPU(sequence, odata);
 	float xtime = timerCall.Stop();
 	printf("CPU execution time: %f\n", xtime);
-	auto res = ToPairVector(*odata);
+	vector<pair<int, int> > res = ToPairVector(*odata);
 	delete odata;
 	return res;
 }
@@ -572,7 +571,8 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 			/*if (res != 0)
 				printf("%d and %d\n", seq_no, seq2_no);*/
 		}
-		unsigned int b = __ballot_sync(~0, res);
+		__syncthreads();
+		unsigned int b = __ballot(~0, res);
 
 		if (seq2_no > seq_no)
 		{
@@ -614,15 +614,15 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	//auto res = vector<pair<int, int>>();
-	auto res = ToPairVector(h_result);
+	//vector<pair<int,int> > res = vector<pair<int, int>>();
+	vector<pair<int, int> > res = ToPairVector(h_result);
 	return res;
 }
 
 template<unsigned int N>
 vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array)
 {
-	vector<pair<int, int>> result;
+	vector<pair<int, int> > result;
 	for (int i = 1; i < N; ++i)
 	{
 		for (int j = 0; j < i; ++j)
