@@ -205,6 +205,16 @@ public:
 	{
 		return (array + word_index);
 	}
+
+	__host__ __device__ BitSequence(const BitSequence<k> & sequence)
+	{
+		memcpy(array, sequence.array, arSize * 8);
+	}
+
+	__host__ __device__ const BitSequence<k> & operator=(const BitSequence<k> & sequence)
+	{
+		memcpy(array, sequence.array, arSize * 8);
+	}
 	static const unsigned long long arSize = (k + 63) / 64;
 private:
 	unsigned long long array[arSize];
