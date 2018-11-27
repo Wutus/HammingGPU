@@ -20,17 +20,18 @@ using namespace std;
 
 #define CHECK_ERRORS_FORMAT(status, format, ...) do{\
 	if(cudaSuccess != status) {\
-		fprintf(stderr, "Cuda Error in %s:%d - %s", __FILE__, __LINE__, cudaGetErrorString(status));\
+		fprintf(stderr, "Cuda Error in %s:%d - %s - ", __FILE__, __LINE__, cudaGetErrorString(status));\
 		fprintf(stderr, format, __VA_ARGS__);\
 		fprintf(stderr, "\n");\
 	}\
 }while(0)
 
 #define BITS_IN_SEQUENCE 10000 //Number of bits in one sequence
-#define INPUT_SEQUENCE_SIZE 10000ull //Number of sequences
+#define INPUT_SEQUENCE_SIZE 100000ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
-#define MAX_BLOCKS 100000 //Number of maximum blocks per call
-#define THREADS_IN_BLOCK 1024
+#define MAX_BLOCKS 10000 //Number of maximum blocks per call
+#define THREADS_PER_BLOCK 1024 //Number of threads run in one block
+#define SEQUENCES_PER_CALL 30 //Number of rows taken once per function call
 
 template<unsigned long long k>
 class BitSequence;
@@ -163,9 +164,20 @@ int main()
 	printf("Ended sequence generation!\n");
 
 	auto gpuRes = FindPairsGPU2(sequence);
+	//auto gpuRes0 = FindPairsGPU(sequence);
 	auto cpuRes = FindPairsCPU(sequence);
 	//PrintArray(sequence);
-	ComparePairs(gpuRes, cpuRes);
+	//ComparePairs(gpuRes, cpuRes);
+	if (equal(gpuRes.begin(), gpuRes.end(), cpuRes.begin()))
+	{
+		cout << "Result from new GPU implementation are OK" << endl;
+	}
+
+	//if (equal(gpuRes0.begin(), gpuRes0.end(), cpuRes.begin()))
+	//{
+		//cout << "Result from old GPU implementation are OK" << endl;
+	//}
+	//ComparePairs(gpuRes0, cpuRes);
 
 	// cudaDeviceReset must be called before exiting in order for profiling and
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
@@ -194,11 +206,11 @@ public:
 	{
 		array[index / 64] = (array[index / 64] & (~(1ull << (index % 64)))) | ((!!value) << (index % 64));
 	}
-	__host__ __device__ inline unsigned int *GetWord32(unsigned long long word_index)
+	__host__ __device__ inline unsigned int *GetWord32(unsigned int word_index)
 	{
 		return (((unsigned int*)array) + word_index);
 	}
-	__host__ __device__ inline unsigned long long *GetWord64(unsigned long long word_index)
+	__host__ __device__ inline unsigned long long *GetWord64(unsigned int word_index)
 	{
 		return (array + word_index);
 	}
@@ -238,7 +250,7 @@ __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequen
 
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
-	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
+	*i = (unsigned int)ceil((0.5 * (-1 + sqrt(1 + 8 * (k + 1)))));
 	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
 }
 
@@ -396,8 +408,7 @@ __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSeque
 	unsigned int i1, i2;
 	k2ij(i, &i1, &i2);
 	i2 = compareSequences(d_sequence + i1, d_sequence + i2);
-	__syncthreads();
-	i1 = __ballot(i2);
+	i1 = __ballot_sync(~0, i2);
 	*(d_odata->GetWord32(i / 32)) = i1;
 }
 
@@ -412,7 +423,7 @@ ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence)
 
 BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
 {
-	srand(2019);
+	srand(2018);
 
 	BitSequence<BITS_IN_SEQUENCE> * r = new BitSequence<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
 
@@ -482,18 +493,18 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	timerCall.Start();
 #ifdef ITER_GPU
 	unsigned long long offset = 0;
-	for (; offset + MAX_BLOCKS * THREADS_IN_BLOCK < COMPARISONS; offset += MAX_BLOCKS * THREADS_IN_BLOCK)
+	for (; offset + MAX_BLOCKS * THREADS_PER_BLOCK < COMPARISONS; offset += MAX_BLOCKS * THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < MAX_BLOCKS, THREADS_IN_BLOCK >> > (d_idata, d_odata, offset);
+		Hamming1GPU << < MAX_BLOCKS, THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
-	if (COMPARISONS - offset >= THREADS_IN_BLOCK)
+	if (COMPARISONS - offset >= THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < (int)((COMPARISONS - offset) / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, offset);
-		offset += (COMPARISONS - offset) * THREADS_IN_BLOCK;
+		Hamming1GPU << < (int)((COMPARISONS - offset) / THREADS_PER_BLOCK), THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
+		offset += (COMPARISONS - offset) * THREADS_PER_BLOCK;
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
-	if ((COMPARISONS - offset) % THREADS_IN_BLOCK)
+	if ((COMPARISONS - offset) % THREADS_PER_BLOCK)
 	{
 		Hamming1GPU << < 1, (int)(COMPARISONS - offset) >> > (d_idata, d_odata, offset);
 		offset += COMPARISONS - offset;
@@ -503,12 +514,12 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 #else
 	if (COMPARISONS >= THREADS_IN_BLOCK)
 	{
-		Hamming1GPU <<< (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >>> (d_idata, d_odata, 0);
+		Hamming1GPU << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if (COMPARISONS % THREADS_IN_BLOCK)
 	{
-		Hamming1GPU <<< 1, COMPARISONS % THREADS_IN_BLOCK >>> (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
+		Hamming1GPU << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 #endif
@@ -519,7 +530,7 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	cudaFree(d_odata);
 	printf("GPU Times : execution: %f, with copying memory: %f\n", xtime, xmtime);
 
-	vector<pair<int,int> > res = ToPairVector(*h_odata);
+	vector<pair<int, int> > res = ToPairVector(*h_odata);
 	delete h_odata;
 	return res;
 }
@@ -538,76 +549,60 @@ vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
 	return res;
 }
 
-#define SEQUENCES_PER_CALL 1
-#define THREADS_PER_BLOCK 1024
-
-//__global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
-//{
-//	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
-//	unsigned int seq_no = tid + column_offset;
-//
-//	BitSequence<BITS_IN_SEQUENCE> s = *(sequences + seq_no);
-//	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
-//	if (threadIdx.x < SEQUENCES_PER_CALL)
-//	{
-//		ar[threadIdx.x] = *(sequences + row_offset - threadIdx.x);
-//	}
-//	__syncthreads();
-//	for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
-//	{
-//		char res = 0;
-//		unsigned int seq2_no = row_offset - i;
-//		//printf("Seq_no = %d, seq2_no = %d, tid= %d, blockIdx = %d, block_dim = %d, row_offset = %d\n", seq_no, seq2_no, threadIdx.x, blockIdx.x, blockDim.x, row_offset);
-//		if (seq2_no == 0)
-//			break;
-//		if (seq2_no >= INPUT_SEQUENCE_SIZE || seq_no >= INPUT_SEQUENCE_SIZE)
-//			return;
-//		if (seq2_no > seq_no)
-//		{
-//			//printf("Comparing %d with %d - line %d\n", seq_no, seq2_no, __LINE__);
-//			res = compareSequences(&s, &(ar[i]));
-//			//printf("%d and %d - %d\n", seq_no, seq2_no, (short int)res);
-//			/*if (res != 0)
-//				printf("%d and %d\n", seq_no, seq2_no);*/
-//		}
-//		__syncthreads();
-//		unsigned int b = __ballot(res);
-//
-//		if (seq2_no > seq_no)
-//		{
-//			//printf("Seq_no = %d, seq2_no = %d, b = %d\n", seq_no, seq2_no, b);
-//			//printf("%d\n", *(GetPointer(arr, seq2_no, seq_no)));
-//			*(GetPointer(arr, seq2_no, seq_no)) = b;
-//			//printf("b = %d, val = %d\n", b, *(GetPointer(arr, seq2_no, seq_no)));
-//		}
-//	}
-//}
+__host__ __device__ inline char CompareWords64(const unsigned long long & first, const unsigned long long & second)
+{
+	unsigned long long x = first ^ second;
+	return x ? x ^ (x - 1) ? 2 : 1 : 0;
+}
 
 __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
 {
 	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int seq_no = tid + column_offset;
-	printf("%d\n", tid);
-	/*BitSequence<BITS_IN_SEQUENCE> s = *(sequences + seq_no);
+	char res[SEQUENCES_PER_CALL];
+	char m = SEQUENCES_PER_CALL > row_offset ? row_offset : SEQUENCES_PER_CALL;
+	memset(res, 0, SEQUENCES_PER_CALL*sizeof(char));
+
+	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
 	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
-	if (threadIdx.x < SEQUENCES_PER_CALL*(s.arSize/8))
+	if (threadIdx.x < m)
 	{
-		int s = row_offset - threadIdx.x / SEQUENCES_PER_CALL;
-		int b = threadIdx.x % SEQUENCES_PER_CALL;
-		printf("%d %d\n", s, b);
-		*(ar[s].GetWord64(b)) = *((sequences + s)->GetWord64(b));
+		ar[threadIdx.x] = *(sequences + row_offset - threadIdx.x);
 	}
 	__syncthreads();
-	for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
+	for (int j = 0; j < sequences->arSize; ++j)
 	{
-		char res = 0;
+		unsigned long long sf = *(s.GetWord64(j));
+		for (int i = 0; i < m; ++i)
+		{
+			unsigned int seq2_no = row_offset - i;
+			if (seq2_no >= INPUT_SEQUENCE_SIZE || seq_no >= INPUT_SEQUENCE_SIZE)
+				break;
+			if (seq2_no > seq_no)
+			{
+				if (res[i] <= 1)
+				{
+					char r = CompareWords64(sf, *(ar[i].GetWord64(j)));
+					if (r < 2)
+					{
+						res[i] += r;
+					}
+				}
+			}
+		}
+	}
+	for (int i = 0; i < m; ++i)
+	{
+		/*__syncthreads();
+		unsigned int b = __ballot(res);*/
+		unsigned int b = __ballot_sync(~0, !!(res[i] == 1));
 		unsigned int seq2_no = row_offset - i;
-		printf("%d %d\n", seq_no, seq2_no);
-		res = compareSequences(&s, &(ar[i]));
-		__syncthreads();
-		unsigned int b = __ballot(res);
-		*(GetPointer(arr, seq2_no, seq_no)) = b;
-	}*/
+		if (seq2_no > seq_no && seq2_no > 0)
+		{
+			//printf("%d %d\n", seq2_no, seq_no);
+			*(GetPointer(arr, seq2_no, seq_no)) = b;
+		}
+	}
 }
 
 vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
@@ -621,18 +616,18 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
 	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
 	timerCall.Start();
-	CHECK_ERRORS(cudaGetLastError());
+
 	for (int j = INPUT_SEQUENCE_SIZE - 1; j >= 0; j -= SEQUENCES_PER_CALL)
 	{
 		if (j >= THREADS_PER_BLOCK)
 		{
-			Hamming2GPU <<< j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, 0);
-			//CHECK_ERRORS(cudaDeviceSynchronize());
+			Hamming2GPU << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);
+			CHECK_ERRORS(cudaDeviceSynchronize());
 		}
 		if (j % THREADS_PER_BLOCK > 0)
 		{
-			Hamming2GPU <<< 1, j%THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
-			//CHECK_ERRORS(cudaDeviceSynchronize());
+			Hamming2GPU << < 1, j%THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
+			CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "%d %d", j, (j%THREADS_PER_BLOCK));
 		}
 	}
 	CHECK_ERRORS(cudaDeviceSynchronize());
