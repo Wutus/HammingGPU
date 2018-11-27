@@ -397,7 +397,7 @@ __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSeque
 	k2ij(i, &i1, &i2);
 	i2 = compareSequences(d_sequence + i1, d_sequence + i2);
 	__syncthreads();
-	i1 = __ballot(~0, i2);
+	i1 = __ballot(i2);
 	*(d_odata->GetWord32(i / 32)) = i1;
 }
 
@@ -572,7 +572,7 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 				printf("%d and %d\n", seq_no, seq2_no);*/
 		}
 		__syncthreads();
-		unsigned int b = __ballot(~0, res);
+		unsigned int b = __ballot(res);
 
 		if (seq2_no > seq_no)
 		{
@@ -609,7 +609,7 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 			//CHECK_ERRORS(cudaDeviceSynchronize());
 		}
 	}
-	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
+	HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xtime = timerCall.Stop();
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
