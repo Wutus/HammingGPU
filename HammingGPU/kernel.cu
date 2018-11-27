@@ -27,7 +27,7 @@ using namespace std;
 }while(0)
 
 #define BITS_IN_SEQUENCE 10000 //Number of bits in one sequence
-#define INPUT_SEQUENCE_SIZE 100000ull //Number of sequences
+#define INPUT_SEQUENCE_SIZE 10000ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
 #define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_IN_BLOCK 1024
@@ -504,12 +504,12 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 #else
 	if (COMPARISONS >= THREADS_IN_BLOCK)
 	{
-		Hamming1GPU << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
+		Hamming1GPU <<< (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >>> (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if (COMPARISONS % THREADS_IN_BLOCK)
 	{
-		Hamming1GPU << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
+		Hamming1GPU <<< 1, COMPARISONS % THREADS_IN_BLOCK >>> (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 #endif
