@@ -53,7 +53,7 @@ public:
 
 		for (int i = 0; i < N - 1; i++)
 		{
-			arr[i] = new unsigned int[ceil((i + 1) / 32.0)];
+			arr[i] = new unsigned int[(int)(ceil((i + 1) / 32.0))];
 		}
 	}
 
