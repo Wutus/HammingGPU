@@ -27,7 +27,7 @@ using namespace std;
 }while(0)
 
 #define BITS_IN_SEQUENCE 10000 //Number of bits in one sequence
-#define INPUT_SEQUENCE_SIZE 100000ull //Number of sequences
+#define INPUT_SEQUENCE_SIZE 10000ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
 #define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
@@ -522,7 +522,7 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	for (; offset + MAX_BLOCKS * THREADS_PER_BLOCK < COMPARISONS; offset += MAX_BLOCKS * (unsigned long long) THREADS_PER_BLOCK)
 	{
 		Hamming1GPU << < MAX_BLOCKS, THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
-		CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "offset=%llu", offset);
+		//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "offset=%llu", offset);
 	}
 	if (COMPARISONS - offset >= THREADS_PER_BLOCK)
 	{
@@ -538,12 +538,12 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	}
 	CHECK_ERRORS(cudaDeviceSynchronize());
 #else
-	if (COMPARISONS >= THREADS_IN_BLOCK)
+	if (COMPARISONS >= THREADS_PER_BLOCK)
 	{
 		Hamming1GPU << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
-	if (COMPARISONS % THREADS_IN_BLOCK)
+	if (COMPARISONS % THREADS_PER_BLOCK)
 	{
 		Hamming1GPU << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
 		CHECK_ERRORS(cudaDeviceSynchronize());
@@ -695,7 +695,7 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 	DeviceResultArray<INPUT_SEQUENCE_SIZE> d_result;
 	CudaTimer timerCall, timerMemory;
 	float xtime, xmtime;
-	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE;
+	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>) * INPUT_SEQUENCE_SIZE;
 	timerMemory.Start();
 	//HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result;
 	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
