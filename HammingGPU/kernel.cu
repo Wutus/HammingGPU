@@ -11,7 +11,6 @@ using namespace std;
 
 #define ITER_GPU //To omit watchdog on windows
 
-
 #define CHECK_ERRORS(status) do{\
 	if(cudaSuccess != status) {\
 		fprintf(stderr, "Cuda Error in %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(status));\
@@ -29,9 +28,9 @@ using namespace std;
 #define BITS_IN_SEQUENCE 10000 //Number of bits in one sequence
 #define INPUT_SEQUENCE_SIZE 100000ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
-#define MAX_BLOCKS 10000 //Number of maximum blocks per call
+#define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
-#define SEQUENCES_PER_CALL 30 //Number of rows taken once per function call
+#define SEQUENCES_PER_CALL 35 //Number of rows taken once per function call
 
 template<unsigned long long k>
 class BitSequence;
@@ -71,12 +70,6 @@ public:
 		delete[] arr;
 	}
 
-	/*HostResultArray<N>&& operator=(const HostResultArray<N> &h_result)
-	{
-		this->arr = h_result.arr;
-		h_result.arr = nullptr;
-	}*/
-
 	HostResultArray<N>&& operator=(HostResultArray<N> &&h_result)
 	{
 		this->arr = h_result.arr;
@@ -105,9 +98,10 @@ public:
 		unsigned int* temp_arr[N - 1];
 		for (int i = 0; i < N - 1; ++i)
 		{
-			CHECK_ERRORS(cudaMalloc(&(temp_arr[i]), sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
+			CHECK_ERRORS(cudaMallocAsync(&(temp_arr[i]), sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
 		}
-		CHECK_ERRORS(cudaMemcpy(arr, &(temp_arr[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
+		CHECK_ERRORS(cudaMemcpyAsync(arr, &(temp_arr[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
+		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 
 	~DeviceResultArray()
@@ -128,8 +122,9 @@ public:
 		CHECK_ERRORS(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
 		for (int i = 0; i < N - 1; ++i)
 		{
-			CHECK_ERRORS(cudaMemcpy(host.arr[i], temp_arr[i], sizeof(unsigned int) * (ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
+			CHECK_ERRORS(cudaMemcpyAsync(host.arr[i], temp_arr[i], sizeof(unsigned int) * (ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
 		}
+		CHECK_ERRORS(cudaDeviceSynchronize());
 		return host;
 	}
 };
@@ -163,8 +158,10 @@ int main()
 	BitSequence<BITS_IN_SEQUENCE>* sequence = GenerateInput();
 	printf("Ended sequence generation!\n");
 
+	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
+
 	auto gpuRes = FindPairsGPU2(sequence);
-	//auto gpuRes0 = FindPairsGPU(sequence);
+	auto gpuRes0 = FindPairsGPU(sequence);
 	auto cpuRes = FindPairsCPU(sequence);
 	//PrintArray(sequence);
 	//ComparePairs(gpuRes, cpuRes);
@@ -173,10 +170,10 @@ int main()
 		cout << "Result from new GPU implementation are OK" << endl;
 	}
 
-	//if (equal(gpuRes0.begin(), gpuRes0.end(), cpuRes.begin()))
-	//{
-		//cout << "Result from old GPU implementation are OK" << endl;
-	//}
+	if (equal(gpuRes0.begin(), gpuRes0.end(), cpuRes.begin()))
+	{
+		cout << "Result from old GPU implementation are OK" << endl;
+	}
 	//ComparePairs(gpuRes0, cpuRes);
 
 	// cudaDeviceReset must be called before exiting in order for profiling and
@@ -250,7 +247,7 @@ __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequen
 
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
-	*i = (unsigned int)ceil((0.5 * (-1 + sqrt(1 + 8 * (k + 1)))));
+	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
 	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
 }
 
@@ -315,7 +312,6 @@ public:
 	{
 		started = true;
 		cudaEventRecord(start);
-		cudaEventSynchronize(start);
 	}
 
 	float Stop()
@@ -493,20 +489,20 @@ vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
 	timerCall.Start();
 #ifdef ITER_GPU
 	unsigned long long offset = 0;
-	for (; offset + MAX_BLOCKS * THREADS_PER_BLOCK < COMPARISONS; offset += MAX_BLOCKS * THREADS_PER_BLOCK)
+	for (; offset + MAX_BLOCKS * THREADS_PER_BLOCK < COMPARISONS; offset += MAX_BLOCKS * (unsigned long long) THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < MAX_BLOCKS, THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
-		CHECK_ERRORS(cudaDeviceSynchronize());
+		Hamming1GPU <<< MAX_BLOCKS, THREADS_PER_BLOCK >>> (d_idata, d_odata, offset);
+		CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "offset=%llu", offset);
 	}
 	if (COMPARISONS - offset >= THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < (int)((COMPARISONS - offset) / THREADS_PER_BLOCK), THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
+		Hamming1GPU <<< (int)((COMPARISONS - offset) / THREADS_PER_BLOCK), THREADS_PER_BLOCK >>> (d_idata, d_odata, offset);
 		offset += (COMPARISONS - offset) * THREADS_PER_BLOCK;
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
 	if ((COMPARISONS - offset) % THREADS_PER_BLOCK)
 	{
-		Hamming1GPU << < 1, (int)(COMPARISONS - offset) >> > (d_idata, d_odata, offset);
+		Hamming1GPU <<< 1, (int)(COMPARISONS - offset) >>> (d_idata, d_odata, offset);
 		offset += COMPARISONS - offset;
 		CHECK_ERRORS(cudaDeviceSynchronize());
 	}
@@ -565,7 +561,7 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 
 	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
 	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
-	if (threadIdx.x < m)
+	if (threadIdx.x < m )
 	{
 		ar[threadIdx.x] = *(sequences + row_offset - threadIdx.x);
 	}
@@ -631,8 +627,8 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 		}
 	}
 	CHECK_ERRORS(cudaDeviceSynchronize());
-	HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xtime = timerCall.Stop();
+	HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
