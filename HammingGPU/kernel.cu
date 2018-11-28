@@ -429,7 +429,7 @@ __global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSeque
 	k2ij(i, &i1, &i2);
 	c = compareSequences(d_sequence + i1, d_sequence + i2);
 #ifdef LINUX
-	__sync_threads();
+	__syncthreads();
 	b = __ballot(c);
 #else
 	b = __ballot_sync(~0, c);
@@ -620,12 +620,11 @@ __global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsign
 	}
 	for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
 	{
-		/*__syncthreads();
-		unsigned int b = __ballot(res);*/
+		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
 		char v = res[i] == 1;
 #ifdef LINUX
-		__sync_threads();
+		__syncthreads();
 		b = __ballot(v);
 #else
 		b = __ballot_sync(~0, v);
@@ -673,12 +672,11 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 	}
 	for (int i = 0; i < m; ++i)
 	{
-		/*__syncthreads();
-		unsigned int b = __ballot(res);*/
+		unsigned int b;
 		unsigned int seq2_no = row_offset - i;
 		char v = res[i] == 1;
 #ifdef LINUX
-		__sync_threads();
+		__syncthreads();
 		b = __ballot(v);
 #else
 		b = __ballot_sync(~0, v);
