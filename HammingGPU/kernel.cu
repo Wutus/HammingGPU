@@ -184,8 +184,8 @@ int main()
 	auto cpuRes = FindPairsCPU(sequence);
 	cout << "On third call found " << cpuRes.size() << " results" << endl;
 	//PrintArray(sequence);
-	ComparePairs(gpuRes, cpuRes);
-	ComparePairs(gpuRes0, cpuRes);
+	//ComparePairs(gpuRes, cpuRes);
+	//ComparePairs(gpuRes0, cpuRes);
 	/*if (equal(gpuRes.begin(), gpuRes.end(), gpuRes0.begin(), gpuRes0.end()))
 	{
 		cout << "Result from new GPU implementation are OK" << endl;
@@ -269,7 +269,7 @@ __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequen
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j)
 {
 	*i = (unsigned int)ceil((0.5 * (-1 + sqrtl(1 + 8 * (k + 1)))));
-	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((*i) - 1)) - 1;
+	*j = (unsigned int)((k + 1) - 0.5 * (*i) * ((unsigned long long)(*i) - 1)) - 1;
 }
 
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
@@ -687,7 +687,7 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
 	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
 	timerCall.Start();
-
+	unsigned int copied = INPUT_SEQUENCE_SIZE;
 	for (int j = INPUT_SEQUENCE_SIZE - 1; j > 0; j -= SEQUENCES_PER_CALL)
 	{
 		if (j >= THREADS_PER_BLOCK)
@@ -700,15 +700,20 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 			Hamming2GPU <<< 1, j%THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
 			//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "%d %d", j, (j%THREADS_PER_BLOCK));
 		}
-		CHECK_ERRORS(cudaDeviceSynchronize());
-		unsigned int start = j - SEQUENCES_PER_CALL > 0 ? j - SEQUENCES_PER_CALL + 1 : 1;
-		unsigned int quantity = SEQUENCES_PER_CALL > j ? j : SEQUENCES_PER_CALL;
-		//cout << j << " " << start << " " << quantity << endl;
-		//h_result.CopyRows(d_result, start, quantity);
+		/*if (j < INPUT_SEQUENCE_SIZE / 2 && copied == INPUT_SEQUENCE_SIZE)
+		{
+			CHECK_ERRORS(cudaDeviceSynchronize());
+			unsigned int start = j - SEQUENCES_PER_CALL > 0 ? j - SEQUENCES_PER_CALL + 1 : 1;
+			unsigned int quantity = SEQUENCES_PER_CALL > j ? j : SEQUENCES_PER_CALL;
+			//cout << j << " " << start << " " << quantity << endl;
+			h_result.CopyRows(d_result, start, copied - j);
+			copied = j;
+		}*/
 	}
+	//h_result.CopyRows(d_result, 1, copied - 1);
 	CHECK_ERRORS(cudaDeviceSynchronize());
-	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xtime = timerCall.Stop();
+	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
