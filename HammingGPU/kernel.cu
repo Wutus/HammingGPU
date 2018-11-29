@@ -27,7 +27,7 @@ using namespace std;
 }while(0)
 
 #define BITS_IN_SEQUENCE 10000 //Number of bits in one sequence
-#define INPUT_SEQUENCE_SIZE 10000ull //Number of sequences
+#define INPUT_SEQUENCE_SIZE 100ull //Number of sequences
 #define COMPARISONS (((INPUT_SEQUENCE_SIZE*(INPUT_SEQUENCE_SIZE - 1)) / 2)) //Number of comparisons
 #define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
@@ -40,25 +40,16 @@ class CudaTimer;
 template<unsigned int N>
 class DeviceResultArray;
 
-class ResultArray
-{
-public:
-	unsigned int **arr;
-};
-
 template<unsigned int N>
-class HostResultArray : public ResultArray
+class HostResultArray
 {
 public:
-
+	unsigned int* arr;
+	const static unsigned long long size = sizeof(unsigned int)*(16 * (1 + ((N - 1) / 32))*((N - 1) / 32) + ((N - 1) % 32)*((N + 30) / 32));
 	HostResultArray()
 	{
-		arr = new unsigned int*[N - 1];
-
-		for (int i = 0; i < N - 1; i++)
-		{
-			arr[i] = new unsigned int[(int)(ceil((i + 1) / 32.0))];
-		}
+		arr = (unsigned int*)malloc(size);// new unsigned int[size / sizeof(unsigned int)];
+		memset(arr, 0, size);
 	}
 
 	~HostResultArray()
@@ -66,12 +57,7 @@ public:
 		if (arr == nullptr)
 			return;
 
-		for (int i = 0; i < N - 1; i++)
-		{
-			delete[] arr[i];
-		}
-
-		delete[] arr;
+		free(arr);
 	}
 
 	HostResultArray<N>&& operator=(HostResultArray<N> &&h_result)
@@ -86,7 +72,7 @@ public:
 		h_result.arr = nullptr;
 	}
 
-	void CopyRows(const DeviceResultArray<N> & array, unsigned int start, unsigned int quantity)
+	/*void CopyRows(const DeviceResultArray<N> & array, unsigned int start, unsigned int quantity)
 	{
 		unsigned int **temp_arr = new unsigned int*[quantity];
 		cudaMemcpy(temp_arr, array.arr + start - 1, quantity * sizeof(unsigned int*), cudaMemcpyDeviceToHost);
@@ -95,52 +81,38 @@ public:
 			cudaMemcpyAsync(arr[start - 1 + i], temp_arr[i], sizeof(unsigned int) * (int)(ceil((start + i) / 32.0)), cudaMemcpyDeviceToHost);
 		}
 		delete[] temp_arr;
-	}
+	}*/
 
 	char GetBit(unsigned int row, unsigned int col) const
 	{
-		return (char)(arr[row - 1][col / 32] >> (col % 32) & 1);
+		unsigned long long r = row, c = col;
+		unsigned long long offset = (r - 1) / 32 * ((r - 1) / 32 + 1) * 16 + ((row - 1) % 32)*((row - 1) / 32 + 1) + c / 32;
+		return (char)(arr[offset] >> (col % 32) & 1);
 	}
 };
 
 template<unsigned int N>
-class DeviceResultArray : public ResultArray
+class DeviceResultArray
 {
 public:
+	unsigned int *arr;
+	const static unsigned long long size = sizeof(unsigned int)*((1 + ((N - 1) / 32))*((N - 1) / 2) + ((N - 1) % 32)*((N + 30) / 32));
 	DeviceResultArray()
 	{
-		CHECK_ERRORS(cudaMalloc(&arr, sizeof(unsigned int*)*(N - 1)));
-		unsigned int* temp_arr[N - 1];
-		for (int i = 0; i < N - 1; ++i)
-		{
-			CHECK_ERRORS(cudaMalloc(&(temp_arr[i]), sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
-			CHECK_ERRORS(cudaMemset(temp_arr[i], 0, sizeof(unsigned int) * (ceil((i + 1) / 32.0))));
-		}
-		CHECK_ERRORS(cudaMemcpyAsync(arr, &(temp_arr[0]), sizeof(unsigned int*)*(N - 1), cudaMemcpyHostToDevice));
-		CHECK_ERRORS(cudaDeviceSynchronize());
+		//unsigned long long s = ((N - 1) / 32 * 32);
+		CHECK_ERRORS(cudaMalloc(&arr, size));
+		CHECK_ERRORS(cudaMemset(arr, 0, size));
 	}
 
 	~DeviceResultArray()
 	{
-		unsigned int *temp_arr[N - 1];
-		CHECK_ERRORS(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
-		for (int i = 0; i < N - 1; i++)
-		{
-			CHECK_ERRORS(cudaFree(temp_arr[i]));
-		}
 		CHECK_ERRORS(cudaFree(arr));
 	}
 
 	HostResultArray<N> ToHostArray()
 	{
 		HostResultArray<N> host;
-		unsigned int * temp_arr[N - 1];
-		CHECK_ERRORS(cudaMemcpy(temp_arr, arr, sizeof(unsigned int*)*(N - 1), cudaMemcpyDeviceToHost));
-		for (int i = 0; i < N - 1; ++i)
-		{
-			CHECK_ERRORS(cudaMemcpyAsync(host.arr[i], temp_arr[i], sizeof(unsigned int) * (unsigned int)(ceil((i + 1) / 32.0)), cudaMemcpyDeviceToHost));
-		}
-		CHECK_ERRORS(cudaDeviceSynchronize());
+		CHECK_ERRORS(cudaMemcpy(host.arr, arr, size, cudaMemcpyDeviceToHost));
 		return host;
 	}
 };
@@ -161,7 +133,7 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
-__host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col);
+__host__ __device__ unsigned int* GetPointer(unsigned int *arr, unsigned int row, unsigned int col);
 template<unsigned int N>
 vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array);
 
@@ -585,7 +557,7 @@ __host__ __device__ inline char CompareWords64(const unsigned long long & first,
 
 #define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
 
-__global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+__global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int *arr, unsigned int row_offset, unsigned int column_offset)
 {
 	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int seq_no = tid + column_offset;
@@ -634,7 +606,7 @@ __global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsign
 	}
 }
 
-__global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+__global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int *arr, unsigned int row_offset, unsigned int column_offset)
 {
 	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
 	unsigned int seq_no = tid + column_offset;
@@ -651,7 +623,6 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 		{
 			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
 				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
-			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)));
 		}
 	}
 	__syncthreads();
@@ -660,12 +631,10 @@ __global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned i
 		unsigned long long sf = *(s.GetWord64(j));
 		for (int i = 0; i < m; ++i)
 		{
-			//unsigned int seq2_no = row_offset - i;
 			if (res[i] <= 1)
 			{
 				unsigned long long s = *(ar[i].GetWord64(j));
 				char r = CompareWords64(sf, s);
-				//printf("%d %d %d %d % d\n", seq2_no, seq_no, j, i, r);
 				res[i] += r;
 			}
 		}
@@ -697,7 +666,6 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 	float xtime, xmtime;
 	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>) * INPUT_SEQUENCE_SIZE;
 	timerMemory.Start();
-	//HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result;
 	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
 	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
 	timerCall.Start();
@@ -707,31 +675,18 @@ vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence
 		if (j >= THREADS_PER_BLOCK)
 		{
 			Hamming2GPUFast <<< j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, 0);
-			//CHECK_ERRORS(cudaDeviceSynchronize());
 		}
 		if (j % THREADS_PER_BLOCK > 0)
 		{
 			Hamming2GPU <<< 1, j%THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
-			//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "%d %d", j, (j%THREADS_PER_BLOCK));
 		}
-		/*if (j < INPUT_SEQUENCE_SIZE / 2 && copied == INPUT_SEQUENCE_SIZE)
-		{
-			CHECK_ERRORS(cudaDeviceSynchronize());
-			unsigned int start = j - SEQUENCES_PER_CALL > 0 ? j - SEQUENCES_PER_CALL + 1 : 1;
-			unsigned int quantity = SEQUENCES_PER_CALL > j ? j : SEQUENCES_PER_CALL;
-			//cout << j << " " << start << " " << quantity << endl;
-			h_result.CopyRows(d_result, start, copied - j);
-			copied = j;
-		}*/
-	}
-	//h_result.CopyRows(d_result, 1, copied - 1);
+	};
 	CHECK_ERRORS(cudaDeviceSynchronize());
 	xtime = timerCall.Stop();
 	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
 	xmtime = timerMemory.Stop();
 	cudaFree(d_idata);
 	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	//vector<pair<int,int> > res = vector<pair<int, int>>();
 	vector<pair<int, int> > res = ToPairVector(h_result);
 	return res;
 }
@@ -754,9 +709,11 @@ vector<pair<int, int> > ToPairVector(const HostResultArray<N> & result_array)
 	return result;
 }
 
-__host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col)
+__host__ __device__ unsigned int* GetPointer(unsigned int *arr, unsigned int row, unsigned int col)
 {
-	return arr[row - 1] + col / 32;
+	unsigned long long r = row, c = col;
+	unsigned long long offset = (r-1)/32 * ((r-1)/32+1)*16 + ((row-1)%32)*((row-1)/32+1) + c / 32;
+	return arr + offset;
 }
 
 void PrintArray(BitSequence<BITS_IN_SEQUENCE> * arr)
