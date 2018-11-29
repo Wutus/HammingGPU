@@ -32,6 +32,7 @@ using namespace std;
 #define MAX_BLOCKS 100000 //Number of maximum blocks per call
 #define THREADS_PER_BLOCK 1024 //Number of threads run in one block
 #define SEQUENCES_PER_CALL 35 //Number of rows taken once per function call
+#define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
 
 template<unsigned long long k>
 class BitSequence;
@@ -145,7 +146,7 @@ public:
 	}
 };
 
-__global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSequence<COMPARISONS> *d_odata, unsigned long long offset = 0);
+__global__ void ComparisonHammingKernel(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSequence<COMPARISONS> *d_odata, unsigned long long offset = 0);
 __host__ __device__ char compareSequences(BitSequence<BITS_IN_SEQUENCE> * sequence1, BitSequence<BITS_IN_SEQUENCE> * sequence2);
 __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned int  * j);
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j);
@@ -158,8 +159,8 @@ BitSequence<BITS_IN_SEQUENCE> * GenerateInput();
 vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_sequence);
 void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream);
 
-vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
-vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
+vector<pair<int, int> > ComparisonHammingGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
+vector<pair<int, int> > SharedHammingGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence);
 vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence);
 __host__ __device__ unsigned int* GetPointer(unsigned int **arr, unsigned int row, unsigned int col);
 template<unsigned int N>
@@ -176,10 +177,10 @@ int main()
 
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
 
-	auto gpuRes = FindPairsGPU2(sequence);
+	auto gpuRes = SharedHammingGPU(sequence);
 	cout << "On first call found " << gpuRes.size() << " results" << endl;
 	cout.flush();
-	auto gpuRes0 = FindPairsGPU(sequence);
+	auto gpuRes0 = ComparisonHammingGPU(sequence);
 	cout << "On second call found " << gpuRes0.size() << " results" << endl;
 	cout.flush();
 	auto cpuRes = FindPairsCPU(sequence);
@@ -207,6 +208,281 @@ int main()
 	}
 
 	return 0;
+}
+
+__global__ void ComparisonHammingKernel(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSequence<COMPARISONS> *d_odata, unsigned long long offset)
+{
+	unsigned long long i = threadIdx.x + blockIdx.x * blockDim.x + offset;
+	unsigned int i1, i2;
+	unsigned int c, b;
+	k2ij(i, &i1, &i2);
+	c = compareSequences(d_sequence + i1, d_sequence + i2);
+#ifdef LINUX
+	__syncthreads();
+	b = __ballot(c);
+#else
+	b = __ballot_sync(~0, c);
+#endif
+	if (!!(i % 32))
+		*(d_odata->GetWord32(i / 32)) = b;
+}
+
+vector<pair<int, int> > ComparisonHammingGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
+{
+	BitSequence<BITS_IN_SEQUENCE> *d_idata;
+	BitSequence<COMPARISONS> *h_odata, *d_odata;
+	CudaTimer timerCall, timerMemory;
+	float xtime, xmtime;
+	h_odata = new BitSequence<COMPARISONS>;
+	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE, outputSize = sizeof(BitSequence<COMPARISONS>);
+	timerMemory.Start();
+	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
+	CHECK_ERRORS(cudaMalloc(&d_odata, outputSize));
+	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
+	CHECK_ERRORS(cudaMemcpy(d_odata, h_odata, outputSize, cudaMemcpyHostToDevice));
+	timerCall.Start();
+#ifdef ITER_GPU
+	unsigned long long offset = 0;
+	for (; offset + MAX_BLOCKS * THREADS_PER_BLOCK < COMPARISONS; offset += MAX_BLOCKS * (unsigned long long) THREADS_PER_BLOCK)
+	{
+		ComparisonHammingKernel << < MAX_BLOCKS, THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
+		CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "offset=%llu", offset);
+	}
+	if (COMPARISONS - offset >= THREADS_PER_BLOCK)
+	{
+		ComparisonHammingKernel << < (int)((COMPARISONS - offset) / THREADS_PER_BLOCK), THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
+		offset += (COMPARISONS - offset) / THREADS_PER_BLOCK * THREADS_PER_BLOCK;
+	}
+	if ((COMPARISONS - offset) % THREADS_PER_BLOCK)
+	{
+		ComparisonHammingKernel << < 1, (int)(COMPARISONS - offset) >> > (d_idata, d_odata, offset);
+		offset += COMPARISONS - offset;
+	}
+	CHECK_ERRORS(cudaDeviceSynchronize());
+#else
+	if (COMPARISONS >= THREADS_PER_BLOCK)
+	{
+		ComparisonHammingKernel << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
+		CHECK_ERRORS(cudaDeviceSynchronize());
+	}
+	if (COMPARISONS % THREADS_PER_BLOCK)
+	{
+		ComparisonHammingKernel << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
+		CHECK_ERRORS(cudaDeviceSynchronize());
+	}
+#endif
+	xtime = timerCall.Stop();
+	CHECK_ERRORS(cudaMemcpy(h_odata, d_odata, outputSize, cudaMemcpyDeviceToHost));
+	xmtime = timerMemory.Stop();
+	cudaFree(d_idata);
+	cudaFree(d_odata);
+	printf("GPU Times : execution: %f, with copying memory: %f\n", xtime, xmtime);
+
+	vector<pair<int, int> > res = ToPairVector(*h_odata);
+	delete h_odata;
+	return res;
+}
+
+__global__ void SharedHammingFastKernel(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+{
+	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
+	unsigned int seq_no = tid + column_offset;
+	char res[SEQUENCES_PER_CALL];
+	memset(res, 0, SEQUENCES_PER_CALL * sizeof(char));
+
+	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
+	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
+	for (unsigned int offset = 0; offset < SEQUENCES_PER_CALL * WORDS64_IN_SEQUENCE; offset += blockDim.x)
+	{
+		unsigned int oid = threadIdx.x + offset;
+		if (oid < SEQUENCES_PER_CALL * WORDS64_IN_SEQUENCE)
+		{
+			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
+				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
+			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)));
+		}
+	}
+	__syncthreads();
+	for (int j = 0; j < WORDS64_IN_SEQUENCE; ++j)
+	{
+		unsigned long long sf = *(s.GetWord64(j));
+		for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
+		{
+			if (res[i] <= 1)
+			{
+				char r = CompareWords64(sf, *(ar[i].GetWord64(j)));
+				res[i] += r;
+			}
+		}
+	}
+	for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
+	{
+		unsigned int b;
+		unsigned int seq2_no = row_offset - i;
+		char v = res[i] == 1;
+#ifdef LINUX
+		__syncthreads();
+		b = __ballot(v);
+#else
+		b = __ballot_sync(~0, v);
+#endif
+		if (!(seq_no % 32))
+			*(GetPointer(arr, seq2_no, seq_no)) = b;
+	}
+}
+
+__global__ void SharedHammingKernel(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
+{
+	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
+	unsigned int seq_no = tid + column_offset;
+	char res[SEQUENCES_PER_CALL];
+	char m = SEQUENCES_PER_CALL > row_offset ? row_offset : SEQUENCES_PER_CALL;
+	memset(res, 0, SEQUENCES_PER_CALL * sizeof(char));
+
+	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
+	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
+	for (unsigned int offset = 0; offset < m * WORDS64_IN_SEQUENCE; offset += blockDim.x)
+	{
+		unsigned int oid = threadIdx.x + offset;
+		if (oid < m * WORDS64_IN_SEQUENCE)
+		{
+			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
+				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
+		}
+	}
+	__syncthreads();
+	for (int j = 0; j < WORDS64_IN_SEQUENCE; ++j)
+	{
+		unsigned long long sf = *(s.GetWord64(j));
+		for (int i = 0; i < m; ++i)
+		{
+			if (res[i] <= 1)
+			{
+				unsigned long long s = *(ar[i].GetWord64(j));
+				char r = CompareWords64(sf, s);
+				res[i] += r;
+			}
+		}
+	}
+	for (int i = 0; i < m; ++i)
+	{
+		unsigned int b;
+		unsigned int seq2_no = row_offset - i;
+		char v = res[i] == 1;
+#ifdef LINUX
+		__syncthreads();
+		b = __ballot(v);
+#else
+		b = __ballot_sync(~0, v);
+#endif
+		if (seq2_no > seq_no && !(seq_no % 32))
+		{
+			*(GetPointer(arr, seq2_no, seq_no)) = b;
+		}
+	}
+}
+
+vector<pair<int, int> > SharedHammingGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
+{
+	BitSequence<BITS_IN_SEQUENCE> *d_idata;
+	DeviceResultArray<INPUT_SEQUENCE_SIZE> d_result;
+	CudaTimer timerCall, timerMemory;
+	float xtime, xmtime;
+	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>) * INPUT_SEQUENCE_SIZE;
+	timerMemory.Start();
+	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
+	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
+	timerCall.Start();
+	unsigned int copied = INPUT_SEQUENCE_SIZE;
+	for (int j = INPUT_SEQUENCE_SIZE - 1; j > 0; j -= SEQUENCES_PER_CALL)
+	{
+		if (j >= THREADS_PER_BLOCK)
+		{
+			SharedHammingFastKernel << < j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, 0);
+		}
+		if (j % THREADS_PER_BLOCK > 0)
+		{
+			SharedHammingKernel << < 1, j%THREADS_PER_BLOCK >> > (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
+		}
+	}
+	CHECK_ERRORS(cudaDeviceSynchronize());
+	xtime = timerCall.Stop();
+	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
+	xmtime = timerMemory.Stop();
+	cudaFree(d_idata);
+	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
+	vector<pair<int, int> > res = ToPairVector(h_result);
+	return res;
+}
+
+void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISONS> * odata)
+{
+	unsigned long long numberOfComparisons = COMPARISONS;
+	int i1 = 1, i2 = 0;
+	for (unsigned long long k = 0; k < numberOfComparisons / 32; ++k)
+	{
+		unsigned int result = 0;
+		for (int i = 0; i < 32; i++)
+		{
+			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
+			++i2;
+			if (i2 == i1)
+			{
+				++i1;
+				i2 = 0;
+			}
+		}
+		*(odata->GetWord32(k)) = result;
+	}
+	if (numberOfComparisons % 32)
+	{
+		unsigned int result = 0;
+		for (int i = 0; i < numberOfComparisons % 32; i++)
+		{
+			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
+			++i2;
+			if (i2 == i1)
+			{
+				++i1;
+				i2 = 0;
+			}
+		}
+		*(odata->GetWord32(numberOfComparisons / 32)) = result;
+	}
+}
+
+vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
+{
+	BitSequence<COMPARISONS> *odata;
+	odata = new BitSequence<COMPARISONS>();
+	CudaTimer timerCall;
+	timerCall.Start();
+	Hamming1CPU(sequence, odata);
+	float xtime = timerCall.Stop();
+	printf("CPU execution time: %f\n", xtime);
+	vector<pair<int, int> > res = ToPairVector(*odata);
+	delete odata;
+	return res;
+}
+
+BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
+{
+	srand(2018);
+
+	BitSequence<BITS_IN_SEQUENCE> * r = new BitSequence<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
+
+	memset(r, 0, sizeof(BitSequence<BITS_IN_SEQUENCE>)*INPUT_SEQUENCE_SIZE);
+
+	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
+	{
+		for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
+		{
+			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
+		}
+		if (BITS_IN_SEQUENCE % 32)
+			*(r[i].GetWord32(BITS_IN_SEQUENCE / 32)) = (rand() + rand()*RAND_MAX) % (1 << (BITS_IN_SEQUENCE % 32));
+	}
+	return r;
 }
 
 template<unsigned long long k>
@@ -276,42 +552,6 @@ __host__ __device__ void k2ij(unsigned long long k, unsigned int * i, unsigned i
 __host__ __device__ unsigned long long ij2k(unsigned int i, unsigned int j)
 {
 	return ((unsigned long long)i) * (i - 1) / 2 + j;
-}
-
-void Hamming1CPU(BitSequence<BITS_IN_SEQUENCE> * sequence, BitSequence<COMPARISONS> * odata)
-{
-	unsigned long long numberOfComparisons = COMPARISONS;
-	int i1 = 1, i2 = 0;
-	for (unsigned long long k = 0; k < numberOfComparisons / 32; ++k)
-	{
-		unsigned int result = 0;
-		for (int i = 0; i < 32; i++)
-		{
-			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
-			++i2;
-			if (i2 == i1)
-			{
-				++i1;
-				i2 = 0;
-			}
-		}
-		*(odata->GetWord32(k)) = result;
-	}
-	if (numberOfComparisons % 32)
-	{
-		unsigned int result = 0;
-		for (int i = 0; i < numberOfComparisons % 32; i++)
-		{
-			result |= (unsigned int)(compareSequences(sequence + i1, sequence + i2)) << i;
-			++i2;
-			if (i2 == i1)
-			{
-				++i1;
-				i2 = 0;
-			}
-		}
-		*(odata->GetWord32(numberOfComparisons / 32)) = result;
-	}
 }
 
 class CudaTimer
@@ -394,17 +634,10 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 	{
 		if (gpu_res[i] != cpu_res[i])
 		{
-			cout << "Difference on " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
+			cout << "Difference on position " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
 				<< cpu_res[i].first << ", " << cpu_res[i].second << ")" << endl;
 			equal = false;
 		}
-		else
-		{
-			//cout << "Pair " << i << ": GPU: (" << gpu_res[i].first << ", " << gpu_res[i].second << ") CPU: ("
-			//		<< cpu_res[i].first << ", " << cpu_res[i].second << ")" << endl;
-
-		}
-
 	}
 	if (csize != gsize)
 	{
@@ -421,23 +654,6 @@ bool ComparePairs(const vector<pair<int, int> > & gpu_result, const vector<pair<
 	return equal;
 }
 
-__global__ void Hamming1GPU(BitSequence<BITS_IN_SEQUENCE> * d_sequence, BitSequence<COMPARISONS> *d_odata, unsigned long long offset)
-{
-	unsigned long long i = threadIdx.x + blockIdx.x * blockDim.x + offset;
-	unsigned int i1, i2;
-	unsigned int c, b;
-	k2ij(i, &i1, &i2);
-	c = compareSequences(d_sequence + i1, d_sequence + i2);
-#ifdef LINUX
-	__syncthreads();
-	b = __ballot(c);
-#else
-	b = __ballot_sync(~0, c);
-#endif
-	if(!!(i % 32))
-		*(d_odata->GetWord32(i / 32)) = b;
-}
-
 ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence)
 {
 	for (unsigned long long i = 0; i < BITS_IN_SEQUENCE; ++i)
@@ -445,27 +661,6 @@ ostream & operator<<(ostream & out, BitSequence<BITS_IN_SEQUENCE> & sequence)
 		out << (short int)sequence.GetBit(i);
 	}
 	return out;
-}
-
-BitSequence<BITS_IN_SEQUENCE> * GenerateInput()
-{
-	srand(2018);
-
-	BitSequence<BITS_IN_SEQUENCE> * r = new BitSequence<BITS_IN_SEQUENCE>[INPUT_SEQUENCE_SIZE];
-
-	memset(r, 0, sizeof(BitSequence<BITS_IN_SEQUENCE>)*INPUT_SEQUENCE_SIZE);
-
-	for (int i = 0; i < INPUT_SEQUENCE_SIZE; i++)
-	{
-		*(r[i].GetWord32(0)) = i;
-		/*for (int j = 0; j < BITS_IN_SEQUENCE / 32; j++)
-		{
-			*(r[i].GetWord32(j)) = rand() + rand()*RAND_MAX;
-		}
-		if(BITS_IN_SEQUENCE % 32)
-			*(r[i].GetWord32(BITS_IN_SEQUENCE / 32)) = (rand() + rand()*RAND_MAX)%(1<<(BITS_IN_SEQUENCE%32));*/
-	}
-	return r;
 }
 
 vector<pair<int, int> > ToPairVector(const BitSequence<COMPARISONS> & result_sequence)
@@ -503,237 +698,10 @@ void PrintAsMatrix(const BitSequence<COMPARISONS> & sequence, ostream & stream)
 	}
 }
 
-vector<pair<int, int> > FindPairsGPU(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
-{
-	BitSequence<BITS_IN_SEQUENCE> *d_idata;
-	BitSequence<COMPARISONS> *h_odata, *d_odata;
-	CudaTimer timerCall, timerMemory;
-	float xtime, xmtime;
-	h_odata = new BitSequence<COMPARISONS>;
-	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>)* INPUT_SEQUENCE_SIZE, outputSize = sizeof(BitSequence<COMPARISONS>);
-	timerMemory.Start();
-	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
-	CHECK_ERRORS(cudaMalloc(&d_odata, outputSize));
-	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
-	CHECK_ERRORS(cudaMemcpy(d_odata, h_odata, outputSize, cudaMemcpyHostToDevice));
-	timerCall.Start();
-#ifdef ITER_GPU
-	unsigned long long offset = 0;
-	for (; offset + MAX_BLOCKS * THREADS_PER_BLOCK < COMPARISONS; offset += MAX_BLOCKS * (unsigned long long) THREADS_PER_BLOCK)
-	{
-		Hamming1GPU << < MAX_BLOCKS, THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
-		//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "offset=%llu", offset);
-	}
-	if (COMPARISONS - offset >= THREADS_PER_BLOCK)
-	{
-		Hamming1GPU << < (int)((COMPARISONS - offset) / THREADS_PER_BLOCK), THREADS_PER_BLOCK >> > (d_idata, d_odata, offset);
-		offset += (COMPARISONS - offset) / THREADS_PER_BLOCK * THREADS_PER_BLOCK;
-		//CHECK_ERRORS(cudaDeviceSynchronize());
-	}
-	if ((COMPARISONS - offset) % THREADS_PER_BLOCK)
-	{
-		Hamming1GPU << < 1, (int)(COMPARISONS - offset) >> > (d_idata, d_odata, offset);
-		offset += COMPARISONS - offset;
-		//CHECK_ERRORS(cudaDeviceSynchronize());
-	}
-	CHECK_ERRORS(cudaDeviceSynchronize());
-#else
-	if (COMPARISONS >= THREADS_PER_BLOCK)
-	{
-		Hamming1GPU << < (int)(COMPARISONS / THREADS_IN_BLOCK), THREADS_IN_BLOCK >> > (d_idata, d_odata, 0);
-		CHECK_ERRORS(cudaDeviceSynchronize());
-	}
-	if (COMPARISONS % THREADS_PER_BLOCK)
-	{
-		Hamming1GPU << < 1, COMPARISONS % THREADS_IN_BLOCK >> > (d_idata, d_odata, (COMPARISONS / THREADS_IN_BLOCK) * THREADS_IN_BLOCK);
-		CHECK_ERRORS(cudaDeviceSynchronize());
-	}
-#endif
-	xtime = timerCall.Stop();
-	CHECK_ERRORS(cudaMemcpy(h_odata, d_odata, outputSize, cudaMemcpyDeviceToHost));
-	xmtime = timerMemory.Stop();
-	cudaFree(d_idata);
-	cudaFree(d_odata);
-	printf("GPU Times : execution: %f, with copying memory: %f\n", xtime, xmtime);
-
-	vector<pair<int, int> > res = ToPairVector(*h_odata);
-	delete h_odata;
-	return res;
-}
-
-vector<pair<int, int> > FindPairsCPU(BitSequence<BITS_IN_SEQUENCE> * sequence)
-{
-	BitSequence<COMPARISONS> *odata;
-	odata = new BitSequence<COMPARISONS>();
-	CudaTimer timerCall;
-	timerCall.Start();
-	Hamming1CPU(sequence, odata);
-	float xtime = timerCall.Stop();
-	printf("CPU execution time: %f\n", xtime);
-	vector<pair<int, int> > res = ToPairVector(*odata);
-	delete odata;
-	return res;
-}
-
 __host__ __device__ inline char CompareWords64(const unsigned long long & first, const unsigned long long & second)
 {
 	unsigned long long x = first ^ second;
-
-	//printf("x = %llu, f = %llu, s = %llu, res = %d, x&(x-1) = %llu\n", x, first, second, (int)(x > 0? ((x & (x - 1)) ? 2 : 1) : 0), (x & (x - 1)));
 	return (x ? ((x & (x - 1)) ? 2 : 1) : 0);
-}
-
-#define WORDS64_IN_SEQUENCE ((BITS_IN_SEQUENCE + 63) / 64)
-
-__global__ void Hamming2GPUFast(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
-{
-	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	unsigned int seq_no = tid + column_offset;
-	char res[SEQUENCES_PER_CALL];
-	memset(res, 0, SEQUENCES_PER_CALL * sizeof(char));
-
-	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
-	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
-	for (unsigned int offset = 0; offset < SEQUENCES_PER_CALL * WORDS64_IN_SEQUENCE; offset += blockDim.x)
-	{
-		unsigned int oid = threadIdx.x + offset;
-		if (oid < SEQUENCES_PER_CALL * WORDS64_IN_SEQUENCE)
-		{
-			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
-				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
-			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)));
-		}
-	}
-	__syncthreads();
-	for (int j = 0; j < WORDS64_IN_SEQUENCE; ++j)
-	{
-		unsigned long long sf = *(s.GetWord64(j));
-		for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
-		{
-			//unsigned int seq2_no = row_offset - i;
-			if (res[i] <= 1)
-			{
-				char r = CompareWords64(sf, *(ar[i].GetWord64(j)));
-				res[i] += r;
-			}
-		}
-	}
-	for (int i = 0; i < SEQUENCES_PER_CALL; ++i)
-	{
-		unsigned int b;
-		unsigned int seq2_no = row_offset - i;
-		char v = res[i] == 1;
-#ifdef LINUX
-		__syncthreads();
-		b = __ballot(v);
-#else
-		b = __ballot_sync(~0, v);
-#endif
-		if(!(seq_no % 32))
-			*(GetPointer(arr, seq2_no, seq_no)) = b;
-	}
-}
-
-__global__ void Hamming2GPU(BitSequence<BITS_IN_SEQUENCE> *sequences, unsigned int **arr, unsigned int row_offset, unsigned int column_offset)
-{
-	unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
-	unsigned int seq_no = tid + column_offset;
-	char res[SEQUENCES_PER_CALL];
-	char m = SEQUENCES_PER_CALL > row_offset ? row_offset : SEQUENCES_PER_CALL;
-	memset(res, 0, SEQUENCES_PER_CALL * sizeof(char));
-
-	BitSequence<BITS_IN_SEQUENCE> & s = *(sequences + seq_no);
-	__shared__ BitSequence<BITS_IN_SEQUENCE> ar[SEQUENCES_PER_CALL];
-	for (unsigned int offset = 0; offset < m * WORDS64_IN_SEQUENCE; offset += blockDim.x)
-	{
-		unsigned int oid = threadIdx.x + offset;
-		if (oid < m * WORDS64_IN_SEQUENCE)
-		{
-			*(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)) =
-				*((sequences + row_offset - oid / WORDS64_IN_SEQUENCE)->GetWord64(oid % WORDS64_IN_SEQUENCE));
-			//printf("Thread %d wrote %llu\n", oid, *(ar[oid / WORDS64_IN_SEQUENCE].GetWord64(oid % WORDS64_IN_SEQUENCE)));
-		}
-	}
-	__syncthreads();
-	for (int j = 0; j < WORDS64_IN_SEQUENCE; ++j)
-	{
-		unsigned long long sf = *(s.GetWord64(j));
-		for (int i = 0; i < m; ++i)
-		{
-			//unsigned int seq2_no = row_offset - i;
-			if (res[i] <= 1)
-			{
-				unsigned long long s = *(ar[i].GetWord64(j));
-				char r = CompareWords64(sf, s);
-				//printf("%d %d %d %d % d\n", seq2_no, seq_no, j, i, r);
-				res[i] += r;
-			}
-		}
-	}
-	for (int i = 0; i < m; ++i)
-	{
-		unsigned int b;
-		unsigned int seq2_no = row_offset - i;
-		char v = res[i] == 1;
-#ifdef LINUX
-		__syncthreads();
-		b = __ballot(v);
-#else
-		b = __ballot_sync(~0, v);
-#endif
-		//printf("%d %d %d %d %d\n", seq_no, seq2_no, (int)v, b, (int)res[i]);
-		if (seq2_no > seq_no && !(seq_no%32))
-		{
-			*(GetPointer(arr, seq2_no, seq_no)) = b;
-		}
-	}
-}
-
-vector<pair<int, int> > FindPairsGPU2(BitSequence<BITS_IN_SEQUENCE> * h_sequence)
-{
-	BitSequence<BITS_IN_SEQUENCE> *d_idata;
-	DeviceResultArray<INPUT_SEQUENCE_SIZE> d_result;
-	CudaTimer timerCall, timerMemory;
-	float xtime, xmtime;
-	unsigned long long inputSize = sizeof(BitSequence<BITS_IN_SEQUENCE>) * INPUT_SEQUENCE_SIZE;
-	timerMemory.Start();
-	//HostResultArray<(unsigned int)INPUT_SEQUENCE_SIZE> h_result;
-	CHECK_ERRORS(cudaMalloc(&d_idata, inputSize));
-	CHECK_ERRORS(cudaMemcpy(d_idata, h_sequence, inputSize, cudaMemcpyHostToDevice));
-	timerCall.Start();
-	unsigned int copied = INPUT_SEQUENCE_SIZE;
-	for (int j = INPUT_SEQUENCE_SIZE - 1; j > 0; j -= SEQUENCES_PER_CALL)
-	{
-		if (j >= THREADS_PER_BLOCK)
-		{
-			Hamming2GPUFast <<< j / THREADS_PER_BLOCK, THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, 0);
-			//CHECK_ERRORS(cudaDeviceSynchronize());
-		}
-		if (j % THREADS_PER_BLOCK > 0)
-		{
-			Hamming2GPU <<< 1, j%THREADS_PER_BLOCK >>> (d_idata, d_result.arr, j, j - (j%THREADS_PER_BLOCK));
-			//CHECK_ERRORS_FORMAT(cudaDeviceSynchronize(), "%d %d", j, (j%THREADS_PER_BLOCK));
-		}
-		/*if (j < INPUT_SEQUENCE_SIZE / 2 && copied == INPUT_SEQUENCE_SIZE)
-		{
-			CHECK_ERRORS(cudaDeviceSynchronize());
-			unsigned int start = j - SEQUENCES_PER_CALL > 0 ? j - SEQUENCES_PER_CALL + 1 : 1;
-			unsigned int quantity = SEQUENCES_PER_CALL > j ? j : SEQUENCES_PER_CALL;
-			//cout << j << " " << start << " " << quantity << endl;
-			h_result.CopyRows(d_result, start, copied - j);
-			copied = j;
-		}*/
-	}
-	//h_result.CopyRows(d_result, 1, copied - 1);
-	CHECK_ERRORS(cudaDeviceSynchronize());
-	xtime = timerCall.Stop();
-	HostResultArray<INPUT_SEQUENCE_SIZE> h_result(d_result.ToHostArray());
-	xmtime = timerMemory.Stop();
-	cudaFree(d_idata);
-	printf("GPU Times : execution: %f, with memory: %f\n", xtime, xmtime);
-	//vector<pair<int,int> > res = vector<pair<int, int>>();
-	vector<pair<int, int> > res = ToPairVector(h_result);
-	return res;
 }
 
 template<unsigned int N>
